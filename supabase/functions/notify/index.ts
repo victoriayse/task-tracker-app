@@ -11,6 +11,7 @@ const cors = {
 const json = (b: unknown, s = 200) =>
   new Response(JSON.stringify(b), { status: s, headers: { ...cors, "Content-Type": "application/json" } });
 
+const OWNER = "00000000-0000-0000-0000-000000000001";
 const admin = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
 
 let configLoaded = false;
@@ -135,10 +136,24 @@ Deno.serve(async (req) => {
       return json({ ok: true, sg: now, inWindow, reminders, charged });
     }
 
-    // ---- Called from the app by the signed-in user ----
-    const token = (req.headers.get("Authorization") || "").replace("Bearer ", "");
-    const { data: { user } } = await admin.auth.getUser(token);
-    if (!user) return json({ error: "unauthorized" }, 401);
+    // ---- Called from the app (public, shared tracker — no login) ----
+    const user = { id: OWNER };
+
+    if (body.mode === "subscribe" || body.mode === "unsubscribe") {
+      const s = body.subscription || {};
+      if (!s.endpoint || typeof s.endpoint !== "string" || !/^https:\/\//.test(s.endpoint)) return json({ error: "bad subscription" }, 400);
+      if (body.mode === "unsubscribe") {
+        await admin.from("push_subscriptions").delete().eq("endpoint", s.endpoint);
+        return json({ ok: true });
+      }
+      if (!s.keys?.p256dh || !s.keys?.auth) return json({ error: "bad subscription" }, 400);
+      const { error } = await admin.from("push_subscriptions").upsert(
+        { user_id: OWNER, endpoint: s.endpoint, p256dh: s.keys.p256dh, auth: s.keys.auth },
+        { onConflict: "endpoint" },
+      );
+      if (error) return json({ error: error.message }, 500);
+      return json({ ok: true });
+    }
 
     if (body.mode === "test") {
       const sent = await sendToUser(user.id, { title: "🔔 Notifications are on", body: "You'll get task reminders and threshold alerts here.", tag: "test", url: "./" });

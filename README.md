@@ -1,6 +1,6 @@
 # Task Tracker
 
-Mobile-first task tracker with penalty points. Hosted on GitHub Pages, data in Supabase.
+Mobile-first, public (no login) shared task tracker with penalty points. Hosted on GitHub Pages, data in Supabase.
 
 - Today's tasks, tasks due (overdue + next 7 days), monthly calendar
 - Penalty points per task — charged automatically if a task is still unchecked after midnight (Singapore time)

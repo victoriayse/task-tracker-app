@@ -3,7 +3,8 @@ const SUPABASE_URL = "https://ypyxzrmmyqptoduzzazp.supabase.co";
 const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlweXh6cm1teXFwdG9kdXp6YXpwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTMxMTM0NjQsImV4cCI6MjEwODY4OTQ2NH0.jmvbrDabOvvHgCFRvNdBhM6Q63ZYPR-HHl5cdZfEtJo";
 const VAPID_PUBLIC = "BJd0pVUgBPkI3t2OEexmrDiuDdxLtn6BavlNkpm8lBhuepe3vP9u4LUCXb4Bx0o2bSP6-PQkFoXUbTsKAofy56c";
 
-const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY, { auth: { persistSession: false } });
+const OWNER = "00000000-0000-0000-0000-000000000001"; // one shared, public tracker
 const $ = (s, el = document) => el.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
@@ -83,49 +84,6 @@ $("#sheetWrap").addEventListener("click", (e) => { if (e.target.hasAttribute("da
 function lsGet(k, d) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch { return d; } }
 function lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} }
 
-/* ---------- Auth ---------- */
-async function initAuth() {
-  const { data: { session } } = await sb.auth.getSession();
-  sb.auth.onAuthStateChange((ev, s) => {
-    if (ev === "PASSWORD_RECOVERY") return promptNewPassword();
-    if (s?.user && !state.user) { state.user = s.user; boot(); }
-    if (!s) { state.user = null; showAuth(); }
-  });
-  if (session?.user) { state.user = session.user; boot(); } else showAuth();
-}
-function showAuth() { $("#app").classList.add("hidden"); $("#auth").classList.remove("hidden"); }
-function authMsg(m) { $("#authMsg").textContent = m; }
-$("#btnSignIn").onclick = async () => {
-  authMsg("Signing in…");
-  const { error } = await sb.auth.signInWithPassword({ email: $("#authEmail").value.trim(), password: $("#authPass").value });
-  authMsg(error ? error.message : "");
-};
-$("#btnSignUp").onclick = async () => {
-  const email = $("#authEmail").value.trim(), password = $("#authPass").value;
-  if (!email || password.length < 6) return authMsg("Enter your email and a password of at least 6 characters.");
-  authMsg("Creating account…");
-  const { data, error } = await sb.auth.signUp({ email, password, options: { emailRedirectTo: location.origin + location.pathname } });
-  if (error) return authMsg(error.message);
-  if (!data.session) authMsg("Check your email and tap the confirmation link, then come back and sign in.");
-};
-$("#btnForgot").onclick = async () => {
-  const email = $("#authEmail").value.trim();
-  if (!email) return authMsg("Type your email above first.");
-  const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: location.origin + location.pathname });
-  authMsg(error ? error.message : "Password reset email sent.");
-};
-function promptNewPassword() {
-  openSheet(`<h3 class="serif">Set a new password</h3>
-    <label class="field"><span>New password</span><input id="np" type="password" autocomplete="new-password"></label>
-    <button type="button" class="btn primary block" id="npSave">Save password</button>`, (el) => {
-    $("#npSave", el).onclick = async () => {
-      const { error } = await sb.auth.updateUser({ password: $("#np", el).value });
-      if (error) return toast(error.message);
-      closeSheet(); toast("Password updated");
-    };
-  });
-}
-
 /* ---------- Data ---------- */
 async function loadAll() {
   await sb.rpc("apply_my_missed_penalties").then(() => {}, () => {});
@@ -172,7 +130,7 @@ async function pingThreshold() {
 
 /* ---------- Boot ---------- */
 async function boot() {
-  $("#auth").classList.add("hidden");
+  state.user = { id: OWNER };
   $("#app").classList.remove("hidden");
   state.collapsed = lsGet("tt_collapsed", {});
   state.chartTab = lsGet("tt_chartTab", "catalogue");
@@ -760,8 +718,7 @@ function urlB64ToUint8(b64) {
   return Uint8Array.from([...raw].map((c) => c.charCodeAt(0)));
 }
 async function saveSub(sub) {
-  const j = sub.toJSON();
-  await sb.from("push_subscriptions").upsert({ endpoint: j.endpoint, p256dh: j.keys.p256dh, auth: j.keys.auth, user_id: state.user.id }, { onConflict: "endpoint" });
+  await sb.functions.invoke("notify", { body: { mode: "subscribe", subscription: sub.toJSON() } });
 }
 async function enablePush() {
   if (!pushSupported) {
@@ -782,7 +739,7 @@ async function enablePush() {
 async function disablePush() {
   const sub = swReg && (await swReg.pushManager.getSubscription());
   if (sub) {
-    await sb.from("push_subscriptions").delete().eq("endpoint", sub.endpoint);
+    await sb.functions.invoke("notify", { body: { mode: "unsubscribe", subscription: sub.toJSON() } });
     await sub.unsubscribe();
   }
   toast("Notifications off on this device");
@@ -800,7 +757,7 @@ async function openSettings() {
     <div class="setting"><div><b>Reminder schedule</b><small>Hourly for unchecked tasks · Weekdays 9pm–12am · Weekends 12pm–12am (Singapore time). Threshold alerts are sent straight away.</small></div></div>
     ${subscribed ? `<div class="setting"><div><b>Send a reminder now</b><small>Test what the hourly reminder looks like</small></div><button type="button" class="btn small" id="sTest">Send</button></div>` : ""}
     <div class="setting"><div><b>How penalties work</b><small>A task still unchecked after midnight on its date adds its penalty points automatically. You can also add points by hand.</small></div></div>
-    <div class="setting"><div><b>Signed in</b><small>${esc(state.user.email)}</small></div><button type="button" class="btn small" id="sOut">Sign out</button></div>
+    <div class="setting"><div><b>Shared tracker</b><small>No login needed — anyone with this link sees and can edit the same tasks. Turn notifications on separately on each phone.</small></div></div>
     <button type="button" class="btn ghost block" data-close>Close</button>`, (el) => {
     $("#sOn", el) && ($("#sOn", el).onclick = enablePush);
     $("#sOff", el) && ($("#sOff", el).onclick = disablePush);
@@ -808,10 +765,8 @@ async function openSettings() {
       const { data } = await sb.functions.invoke("notify", { body: { mode: "remind" } });
       toast(data?.sent ? "Reminder sent" : "No unchecked tasks to remind about");
     });
-    $("#sOut", el).onclick = async () => { closeSheet(); await sb.auth.signOut(); };
   });
 }
 $("#btnMenu").onclick = openSettings;
 
-// open sheet for a specific day from a notification click (?day=YYYY-MM-DD)
-initAuth();
+boot();
