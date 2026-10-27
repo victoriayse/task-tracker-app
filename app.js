@@ -66,6 +66,7 @@ function relDay(iso) {
 /* ---------- UI helpers ---------- */
 let toastTimer;
 function toast(msg) {
+  if (/row-level security|permission denied|Unauthorized/i.test(String(msg))) msg = "Not signed in as admin — tap ⚙︎ → Admin sign in";
   const t = $("#toast");
   t.textContent = msg;
   t.classList.add("show");
