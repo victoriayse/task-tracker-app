@@ -16,7 +16,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="styles.css?v=1">
+<link rel="stylesheet" href="styles.css?v=2">
 </head>
 <body>
 
@@ -26,11 +26,11 @@
 
   <header class="topbar">
     <div>
-      <div class="eyebrow" id="todayLabel"></div>
+      <div class="eyebrow"><span id="todayLabel"></span> <span id="modeLabel" class="mode-label"></span></div>
       <h1 class="serif title">My Tasks</h1>
     </div>
     <div class="top-actions">
-      <button type="button" class="icon-btn" id="btnArrange" aria-label="Rearrange sections" title="Rearrange">⇅</button>
+      <button type="button" class="icon-btn admin-only" id="btnArrange" aria-label="Rearrange sections" title="Rearrange">⇅</button>
       <button type="button" class="icon-btn" id="btnMenu" aria-label="Settings" title="Settings">⚙︎</button>
     </div>
   </header>
@@ -42,7 +42,7 @@
 
   <main id="sections"></main>
 
-  <button type="button" class="fab" id="fab" aria-label="Add">＋</button>
+  <button type="button" class="fab admin-only" id="fab" aria-label="Add">＋</button>
   <div id="fabMenu" class="fab-menu hidden">
     <button type="button" class="btn" id="fabTask">📝 New task</button>
     <button type="button" class="btn" id="fabPenalty">⚠️ Add penalty points</button>
@@ -61,6 +61,6 @@
 <div id="toast" class="toast"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
-<script src="app.js?v=2"></script>
+<script src="app.js?v=3"></script>
 </body>
 </html>

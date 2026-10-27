@@ -171,3 +171,10 @@ main{max-width:720px;margin:0 auto;padding:6px 16px calc(110px + var(--safe-b))}
 @keyframes up{from{transform:translateY(100%)}to{transform:none}}
 @keyframes fade{from{opacity:0}}
 @media (min-width:600px){.cal-day{min-height:78px}.chip{font-size:11px}}
+
+/* View-only vs admin */
+body:not(.is-admin) .admin-only{display:none!important}
+.mode-label{display:inline-block;margin-left:6px;background:var(--accent-soft);color:var(--accent);border-radius:999px;padding:1px 8px;letter-spacing:.04em}
+.mode-label:empty{display:none}
+.check:disabled{opacity:1;cursor:default}
+input[readonly]{background:transparent;border-color:transparent;padding-left:4px}

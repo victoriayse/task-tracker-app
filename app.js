@@ -3,7 +3,7 @@ const SUPABASE_URL = "https://ypyxzrmmyqptoduzzazp.supabase.co";
 const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlweXh6cm1teXFwdG9kdXp6YXpwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTMxMTM0NjQsImV4cCI6MjEwODY4OTQ2NH0.jmvbrDabOvvHgCFRvNdBhM6Q63ZYPR-HHl5cdZfEtJo";
 const VAPID_PUBLIC = "BJd0pVUgBPkI3t2OEexmrDiuDdxLtn6BavlNkpm8lBhuepe3vP9u4LUCXb4Bx0o2bSP6-PQkFoXUbTsKAofy56c";
 
-const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY, { auth: { persistSession: false } });
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 const OWNER = "00000000-0000-0000-0000-000000000001"; // one shared, public tracker
 const $ = (s, el = document) => el.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -27,6 +27,8 @@ const state = {
   layout: DEFAULT_LAYOUT.slice(),
   collapsed: {},
   chartTab: "catalogue",
+  isAdmin: false,
+  adminEmail: "",
   calMonth: null, // "YYYY-MM"
   calSel: null,
   arranging: false,
@@ -131,6 +133,7 @@ async function pingThreshold() {
 /* ---------- Boot ---------- */
 async function boot() {
   state.user = { id: OWNER };
+  await checkAdmin();
   $("#app").classList.remove("hidden");
   state.collapsed = lsGet("tt_collapsed", {});
   state.chartTab = lsGet("tt_chartTab", "catalogue");
@@ -210,8 +213,8 @@ function taskRow(t, showDate) {
   if (t.penalized) meta.push(`<span class="late">Penalty charged</span>`);
   if (t.notes) meta.push(`<span>📎 ${esc(t.notes.slice(0, 40))}${t.notes.length > 40 ? "…" : ""}</span>`);
   return `<div class="task${t.completed ? " done" : ""}" data-task="${t.id}">
-    <button type="button" class="check${t.completed ? " on" : ""}" data-check="${t.id}" aria-label="${t.completed ? "Mark not done" : "Mark done"}">${t.completed ? "✓" : ""}</button>
-    <div class="task-main" data-edit="${t.id}">
+    <button type="button" class="check${t.completed ? " on" : ""}" data-check="${t.id}" ${state.isAdmin ? "" : "disabled"} aria-label="${t.completed ? "Mark not done" : "Mark done"}">${t.completed ? "✓" : ""}</button>
+    <div class="task-main"${state.isAdmin ? ` data-edit="${t.id}"` : ""}>
       <div class="task-title">${esc(t.title)}</div>
       ${meta.length ? `<div class="task-meta">${meta.join("")}</div>` : ""}
     </div>
@@ -223,7 +226,7 @@ function renderToday() {
   const t = sgDateStr();
   const list = state.tasks.filter((x) => x.due_date === t)
     .sort((a, b) => (a.completed - b.completed));
-  if (!list.length) return `<div class="empty">Nothing scheduled for today. Tap ＋ to add a task.</div>`;
+  if (!list.length) return `<div class="empty">Nothing scheduled for today.${state.isAdmin ? " Tap ＋ to add a task." : ""}</div>`;
   const done = list.filter((x) => x.completed).length;
   const atStake = list.filter((x) => !x.completed).reduce((a, x) => a + x.penalty_points, 0);
   return `<div class="progress-line">${done} of ${list.length} done${atStake ? ` · <b style="color:var(--danger)">${atStake} pts at stake</b> by midnight` : " · all clear 🎉"}</div>
@@ -276,7 +279,7 @@ function renderCalendar() {
     </div>
     <div class="cal-sel">
       <div class="cal-sel-head"><strong>${fmtDate(sel, { weekday: "long", day: "numeric", month: "short" })}</strong>
-        <button type="button" class="btn small" data-addon="${sel}">＋ Task</button></div>
+        ${state.isAdmin ? `<button type="button" class="btn small" data-addon="${sel}">＋ Task</button>` : ""}</div>
       ${selList.length ? selList.map((x) => taskRow(x, false)).join("") : `<div class="empty">No tasks on this day.</div>`}
     </div>`;
 }
@@ -300,7 +303,7 @@ function renderTotal() {
         <div class="hist-item"><div class="h-main"><div>${esc(e.description)}</div>
           <div class="h-date">${new Date(e.created_at).toLocaleString("en-SG", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit", timeZone: "Asia/Singapore" })}${e.source === "missed_task" ? " · auto" : ""}</div></div>
           <span class="h-pts">+${e.points}</span>
-          <button type="button" class="x-btn" data-delentry="${e.id}" aria-label="Remove">✕</button></div>`).join("") : `<div class="empty">No penalty points yet.</div>`}</div>`
+          ${state.isAdmin ? `<button type="button" class="x-btn" data-delentry="${e.id}" aria-label="Remove">✕</button>` : ""}</div>`).join("") : `<div class="empty">No penalty points yet.</div>`}</div>`
     : "";
   return `<div class="total-wrap">
       <div class="total-num${tot === 0 ? " zero" : ""}">${tot}</div>
@@ -308,10 +311,10 @@ function renderTotal() {
     </div>
     ${reached ? `<div class="reached">🚨 ${reached.points} pts reached → ${esc(reached.punishment)}</div>` : ""}
     <div class="btn-row">
-      <button type="button" class="btn primary" data-act="addPenalty">＋ Add penalty</button>
+      ${state.isAdmin ? `<button type="button" class="btn primary" data-act="addPenalty">＋ Add penalty</button>` : ""}
       <button type="button" class="btn" data-act="history">${state.showHistory ? "Hide history" : "History"}</button>
     </div>
-    ${tot > 0 ? `<button type="button" class="link" data-act="served">Punishment served — reset points to 0</button>` : ""}
+    ${tot > 0 && state.isAdmin ? `<button type="button" class="link" data-act="served">Punishment served — reset points to 0</button>` : ""}
     ${hist}`;
 }
 
@@ -321,19 +324,19 @@ function renderChart() {
   if (tab === "catalogue") {
     return tabs + `<div class="chart-head"><span>Item</span><span style="text-align:center">Points</span><span></span></div>
       ${state.catalogue.map((c) => `<div class="chart-row" data-cat="${c.id}">
-        <input type="text" value="${esc(c.item)}" data-field="item" placeholder="Item description">
-        <input type="number" inputmode="numeric" class="num" value="${c.points}" data-field="points" min="0">
-        <button type="button" class="x-btn" data-delcat="${c.id}" aria-label="Delete">✕</button></div>`).join("")}
-      <button type="button" class="btn block" data-act="addCat">＋ Add item</button>
+        <input type="text" value="${esc(c.item)}" data-field="item" ${RO()} placeholder="Item description">
+        <input type="number" inputmode="numeric" class="num" value="${c.points}" data-field="points" min="0" ${RO()}>
+        ${state.isAdmin ? `<button type="button" class="x-btn" data-delcat="${c.id}" aria-label="Delete">✕</button>` : "<span></span>"}</div>`).join("")}
+      ${state.isAdmin ? `<button type="button" class="btn block" data-act="addCat">＋ Add item</button>` : ""}
       <p class="chart-tip">Changes save automatically. Catalogue items appear as quick picks when you add a task or penalty.</p>`;
   }
   const tot = totalPoints();
   return tabs + `<div class="chart-head th"><span style="text-align:center">Points</span><span>Punishment</span><span></span></div>
     ${state.thresholds.map((t) => `<div class="chart-row th${t.points > 0 && tot >= t.points ? " hit" : ""}" data-th="${t.id}">
-      <input type="number" inputmode="numeric" class="num" value="${t.points}" data-field="points" min="0">
-      <input type="text" value="${esc(t.punishment)}" data-field="punishment" placeholder="Type of punishment">
-      <button type="button" class="x-btn" data-delth="${t.id}" aria-label="Delete">✕</button></div>`).join("")}
-    <button type="button" class="btn block" data-act="addTh">＋ Add threshold</button>
+      <input type="number" inputmode="numeric" class="num" value="${t.points}" data-field="points" min="0" ${RO()}>
+      <input type="text" value="${esc(t.punishment)}" data-field="punishment" ${RO()} placeholder="Type of punishment">
+      ${state.isAdmin ? `<button type="button" class="x-btn" data-delth="${t.id}" aria-label="Delete">✕</button>` : "<span></span>"}</div>`).join("")}
+    ${state.isAdmin ? `<button type="button" class="btn block" data-act="addTh">＋ Add threshold</button>` : ""}
     <p class="chart-tip">When your total reaches a threshold you'll see a red bar at the top and get a phone notification.</p>`;
 }
 
@@ -356,6 +359,7 @@ $("#sections").addEventListener("click", async (e) => {
   const sec = el.closest("[data-sec]")?.dataset.sec;
   const d = el.dataset;
 
+  if (d.move && !state.isAdmin) return;
   if (d.move) {
     const i = state.layout.indexOf(sec), j = i + Number(d.move);
     if (j < 0 || j >= state.layout.length) return;
@@ -369,6 +373,8 @@ $("#sections").addEventListener("click", async (e) => {
     state.collapsed[sec] = !state.collapsed[sec];
     lsSet("tt_collapsed", state.collapsed); renderAll(); return;
   }
+  const WRITE = d.check || d.edit || d.addon || d.delcat || d.delth || d.delentry || d.move || ["addCat", "addTh", "addPenalty", "served"].includes(d.act);
+  if (WRITE && !state.isAdmin) return toast("View only — admin sign-in needed to make changes");
   if (d.check) return toggleTask(d.check);
   if (d.edit) return openTaskSheet(state.tasks.find((t) => t.id === d.edit));
   if (d.day) { state.calSel = d.day; renderAll(); return; }
@@ -398,7 +404,7 @@ $("#sections").addEventListener("click", async (e) => {
 $("#sections").addEventListener("change", async (e) => {
   const inp = e.target;
   const field = inp.dataset.field;
-  if (!field) return;
+  if (!field || !state.isAdmin) return;
   const catRow = inp.closest("[data-cat]"), thRow = inp.closest("[data-th]");
   const val = inp.type === "number" ? Math.max(0, parseInt(inp.value || "0", 10)) : inp.value.trim();
   if (catRow) {
@@ -685,6 +691,58 @@ async function deleteRow(table, key, id) {
   if (key === "thresholds") pingThreshold();
 }
 
+/* ---------- Admin ---------- */
+function RO() { return state.isAdmin ? "" : "readonly"; }
+async function checkAdmin() {
+  const { data: { session } } = await sb.auth.getSession();
+  state.isAdmin = false; state.adminEmail = "";
+  if (session?.user) {
+    const { data } = await sb.rpc("is_admin");
+    state.isAdmin = !!data;
+    state.adminEmail = session.user.email || "";
+  }
+  document.body.classList.toggle("is-admin", state.isAdmin);
+  $("#modeLabel").textContent = state.isAdmin ? "" : "View only";
+}
+function openAdminLogin() {
+  openSheet(`<h3 class="serif">Admin sign in</h3>
+    <p class="muted" style="margin:0;font-size:14px">Only the admin can add, tick or change things.</p>
+    <label class="field"><span>Email</span><input id="aEmail" type="email" autocomplete="email" inputmode="email"></label>
+    <label class="field"><span>Password</span><input id="aPass" type="password" autocomplete="current-password"></label>
+    <button type="button" class="btn primary block" id="aGo">Sign in</button>
+    <button type="button" class="link" id="aForgot">Forgot password?</button>
+    <p class="muted" id="aMsg" style="font-size:14px;min-height:20px"></p>`, (el) => {
+    const msg = (m) => ($("#aMsg", el).textContent = m);
+    $("#aGo", el).onclick = async () => {
+      msg("Signing in…");
+      const { error } = await sb.auth.signInWithPassword({ email: $("#aEmail", el).value.trim(), password: $("#aPass", el).value });
+      if (error) return msg(error.message);
+      await checkAdmin();
+      if (!state.isAdmin) { await sb.auth.signOut(); await checkAdmin(); return msg("This account isn't the admin."); }
+      closeSheet(); renderAll(); toast("Admin mode on");
+    };
+    $("#aForgot", el).onclick = async () => {
+      const email = $("#aEmail", el).value.trim();
+      if (!email) return msg("Type your email above first.");
+      const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: location.origin + location.pathname });
+      msg(error ? error.message : "Password reset email sent.");
+    };
+  });
+}
+sb.auth.onAuthStateChange((ev) => {
+  if (ev === "PASSWORD_RECOVERY") {
+    openSheet(`<h3 class="serif">Set a new password</h3>
+      <label class="field"><span>New password</span><input id="np" type="password" autocomplete="new-password"></label>
+      <button type="button" class="btn primary block" id="npSave">Save password</button>`, (el) => {
+      $("#npSave", el).onclick = async () => {
+        const { error } = await sb.auth.updateUser({ password: $("#np", el).value });
+        if (error) return toast(error.message);
+        closeSheet(); await checkAdmin(); renderAll(); toast("Password updated");
+      };
+    });
+  }
+});
+
 /* ---------- FAB ---------- */
 $("#fab").onclick = () => {
   const open = $("#fabMenu").classList.toggle("hidden");
@@ -757,9 +815,13 @@ async function openSettings() {
     <div class="setting"><div><b>Reminder schedule</b><small>Hourly for unchecked tasks · Weekdays 9pm–12am · Weekends 12pm–12am (Singapore time). Threshold alerts are sent straight away.</small></div></div>
     ${subscribed ? `<div class="setting"><div><b>Send a reminder now</b><small>Test what the hourly reminder looks like</small></div><button type="button" class="btn small" id="sTest">Send</button></div>` : ""}
     <div class="setting"><div><b>How penalties work</b><small>A task still unchecked after midnight on its date adds its penalty points automatically. You can also add points by hand.</small></div></div>
-    <div class="setting"><div><b>Shared tracker</b><small>No login needed — anyone with this link sees and can edit the same tasks. Turn notifications on separately on each phone.</small></div></div>
+    ${state.isAdmin
+      ? `<div class="setting"><div><b>Admin mode</b><small>Signed in as ${esc(state.adminEmail)} — you can make changes</small></div><button type="button" class="btn small" id="sOut">Sign out</button></div>`
+      : `<div class="setting"><div><b>View only</b><small>Anyone with the link can view. Only the admin can make changes.</small></div><button type="button" class="btn small primary" id="sIn">Admin sign in</button></div>`}
     <button type="button" class="btn ghost block" data-close>Close</button>`, (el) => {
     $("#sOn", el) && ($("#sOn", el).onclick = enablePush);
+    $("#sIn", el) && ($("#sIn", el).onclick = openAdminLogin);
+    $("#sOut", el) && ($("#sOut", el).onclick = async () => { await sb.auth.signOut(); await checkAdmin(); closeSheet(); renderAll(); toast("Signed out — view only"); });
     $("#sOff", el) && ($("#sOff", el).onclick = disablePush);
     $("#sTest", el) && ($("#sTest", el).onclick = async () => {
       const { data } = await sb.functions.invoke("notify", { body: { mode: "remind" } });
