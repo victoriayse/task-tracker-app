@@ -21,6 +21,7 @@ const state = {
   user: null,
   tasks: [],
   series: [],
+  images: [],
   entries: [],
   catalogue: [],
   thresholds: [],
@@ -89,15 +90,17 @@ function lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch
 /* ---------- Data ---------- */
 async function loadAll() {
   await sb.rpc("apply_my_missed_penalties").then(() => {}, () => {});
-  const [t, e, c, th, st, se] = await Promise.all([
+  const [t, e, c, th, st, se, im] = await Promise.all([
     sb.from("tasks").select("*").order("due_date").order("due_time", { nullsFirst: true }).order("created_at"),
     sb.from("penalty_entries").select("*").eq("cleared", false).order("created_at", { ascending: false }),
     sb.from("catalogue_items").select("*").order("sort").order("created_at"),
     sb.from("thresholds").select("*").order("points"),
     sb.from("user_settings").select("*").maybeSingle(),
     sb.from("task_series").select("*"),
+    sb.from("task_images").select("*").order("created_at"),
   ]);
-  const err = [t, e, c, th, st, se].find((r) => r.error);
+  const err = [t, e, c, th, st, se, im].find((r) => r.error);
+  state.images = im.data || [];
   if (err) toast("Couldn't load: " + err.error.message);
   state.tasks = t.data || [];
   state.entries = e.data || [];
@@ -186,7 +189,7 @@ function headExtra(k) {
     return list.length ? `<span class="count">${list.filter((x) => x.completed).length}/${list.length}</span>` : "";
   }
   if (k === "due") {
-    const n = state.tasks.filter((x) => !x.completed && x.due_date < t).length;
+    const n = overdueList().length;
     return n ? `<span class="count red">${n} overdue</span>` : "";
   }
   return "";
@@ -211,10 +214,17 @@ function taskRow(t, showDate) {
   const rt = repeatText(t);
   if (rt) meta.push(`<span>🔁 ${esc(rt)}</span>`);
   if (t.penalized) meta.push(`<span class="late">Penalty charged</span>`);
-  if (t.notes) meta.push(`<span>📎 ${esc(t.notes.slice(0, 40))}${t.notes.length > 40 ? "…" : ""}</span>`);
+  if (t._missedCount > 1) meta.push(`<span class="late">${t._missedCount} days missed</span>`);
+  if (t.notes) meta.push(`<span>📝 ${esc(t.notes.slice(0, 40))}${t.notes.length > 40 ? "…" : ""}</span>`);
+  const nImg = imagesFor(t.id).length;
+  if (nImg) meta.push(`<span>📷 ${nImg}</span>`);
+  const checkable = canCheck(t);
+  const box = checkable || !state.isAdmin
+    ? `<button type="button" class="check${t.completed ? " on" : ""}" data-check="${t.id}" ${checkable ? "" : "disabled"} aria-label="${t.completed ? "Mark not done" : "Mark done"}">${t.completed ? "✓" : ""}</button>`
+    : `<span class="check locked${t.completed ? " on" : ""}" title="Repeating tasks can only be ticked on the day, in Today's tasks">${t.completed ? "✓" : "🔁"}</span>`;
   return `<div class="task${t.completed ? " done" : ""}" data-task="${t.id}">
-    <button type="button" class="check${t.completed ? " on" : ""}" data-check="${t.id}" ${state.isAdmin ? "" : "disabled"} aria-label="${t.completed ? "Mark not done" : "Mark done"}">${t.completed ? "✓" : ""}</button>
-    <div class="task-main"${state.isAdmin ? ` data-edit="${t.id}"` : ""}>
+    ${box}
+    <div class="task-main" data-open="${t.id}">
       <div class="task-title">${esc(t.title)}</div>
       ${meta.length ? `<div class="task-meta">${meta.join("")}</div>` : ""}
     </div>
@@ -233,10 +243,30 @@ function renderToday() {
     ${list.map((x) => taskRow(x, false)).join("")}`;
 }
 
+// Repeating tasks appear once: latest missed day (overdue) and next upcoming day
+function onePerSeries(list, pickLatest) {
+  const seen = new Map(), out = [];
+  for (const x of list) {
+    if (!isRepeat(x)) { out.push(x); continue; }
+    const k = x.series_id || x.title;
+    const prev = seen.get(k);
+    if (!prev) { const c = { ...x, _missedCount: 1 }; seen.set(k, c); out.push(c); }
+    else {
+      prev._missedCount++;
+      if (pickLatest && x.due_date > prev.due_date) Object.assign(prev, { ...x, _missedCount: prev._missedCount });
+    }
+  }
+  return out;
+}
+function overdueList() {
+  const t = sgDateStr();
+  return onePerSeries(state.tasks.filter((x) => !x.completed && x.due_date < t).sort((a, b) => a.due_date.localeCompare(b.due_date)), true);
+}
 function renderDue() {
   const t = sgDateStr();
-  const overdue = state.tasks.filter((x) => !x.completed && x.due_date < t).sort((a, b) => a.due_date.localeCompare(b.due_date));
-  const upcoming = state.tasks.filter((x) => !x.completed && x.due_date > t && x.due_date <= addDays(t, 7));
+  const overdue = overdueList();
+  const upcoming = onePerSeries(state.tasks.filter((x) => !x.completed && x.due_date > t && x.due_date <= addDays(t, 7)), false)
+    .map((x) => ({ ...x, _missedCount: 0 }));
   if (!overdue.length && !upcoming.length) return `<div class="empty">No overdue or upcoming tasks this week.</div>`;
   let h = "";
   if (overdue.length) h += `<div class="sub-h" style="color:var(--danger)">Overdue</div>` + overdue.map((x) => taskRow(x, true)).join("");
@@ -260,7 +290,7 @@ function renderCalendar() {
     const list = byDay[d] || [];
     const chips = list.slice(0, 2).map((t) => {
       const cls = t.completed ? "done" : d < today ? "missed" : "";
-      return `<span class="chip ${cls}">${esc(t.title)}</span>`;
+      return `<span class="chip ${cls}" data-open="${t.id}">${esc(t.title)}</span>`;
     }).join("");
     const more = list.length > 2 ? `<span class="chip-more">+${list.length - 2}</span>` : "";
     cells += `<button type="button" class="cal-day${d.slice(0, 7) !== state.calMonth ? " other" : ""}${d === today ? " today" : ""}${d === state.calSel ? " sel" : ""}" data-day="${d}">
@@ -354,7 +384,7 @@ function renderBanner() {
 
 /* ---------- Section interactions (event delegation) ---------- */
 $("#sections").addEventListener("click", async (e) => {
-  const el = e.target.closest("button,[data-edit]");
+  const el = e.target.closest("[data-open],button");
   if (!el) return;
   const sec = el.closest("[data-sec]")?.dataset.sec;
   const d = el.dataset;
@@ -376,7 +406,7 @@ $("#sections").addEventListener("click", async (e) => {
   const WRITE = d.check || d.edit || d.addon || d.delcat || d.delth || d.delentry || d.move || ["addCat", "addTh", "addPenalty", "served"].includes(d.act);
   if (WRITE && !state.isAdmin) return toast("View only — admin sign-in needed to make changes");
   if (d.check) return toggleTask(d.check);
-  if (d.edit) return openTaskSheet(state.tasks.find((t) => t.id === d.edit));
+  if (d.open) return openTaskDetails(d.open);
   if (d.day) { state.calSel = d.day; renderAll(); return; }
   if (d.cal) {
     const [y, m] = state.calMonth.split("-").map(Number);
@@ -433,16 +463,163 @@ $("#btnArrange").onclick = () => { state.arranging = !state.arranging; $("#arran
 $("#btnArrangeDone").onclick = () => { state.arranging = false; $("#arrangeBar").classList.add("hidden"); renderAll(); toast("Layout saved"); };
 
 /* ---------- Tasks ---------- */
+function isRepeat(t) { return !!t.series_id || (t.repeat && t.repeat !== "none"); }
+// Repeating tasks can only be ticked on their own day (i.e. from Today's tasks)
+function canCheck(t) { return state.isAdmin && (!isRepeat(t) || t.due_date === sgDateStr()); }
+
 async function toggleTask(id) {
   const t = state.tasks.find((x) => x.id === id);
   if (!t) return;
-  const completed = !t.completed;
-  Object.assign(t, { completed, completed_at: completed ? new Date().toISOString() : null });
-  renderAll();
-  if (completed && navigator.vibrate) navigator.vibrate(15);
-  const { error } = await sb.from("tasks").update({ completed, completed_at: t.completed_at }).eq("id", id);
-  if (error) { t.completed = !completed; renderAll(); toast(error.message); }
-  else if (completed && t.penalized) toast("Done — but the penalty for missing it still stands");
+  if (!canCheck(t)) return toast("Repeating tasks can only be ticked on the day, in Today's tasks");
+  if (!t.completed) return openCompleteSheet(t);
+  // un-tick (keeps any photos/notes already saved)
+  t.completed = false; t.completed_at = null; renderAll();
+  const { error } = await sb.from("tasks").update({ completed: false, completed_at: null }).eq("id", id);
+  if (error) { t.completed = true; renderAll(); toast(error.message); }
+}
+
+function openCompleteSheet(t) {
+  let files = [];
+  openSheet(`<h3 class="serif">Mark as done</h3>
+    <p class="muted" style="margin:0 0 4px">${esc(t.title)} · ${relDay(t.due_date)}</p>
+    <label class="field"><span>Notes (optional)</span><textarea id="cNote" placeholder="How did it go?">${esc(t.completion_note || "")}</textarea></label>
+    ${photoPickerHtml("cPhotos")}
+    <button type="button" class="btn primary block" id="cSave">✓ Mark done</button>
+    <button type="button" class="btn ghost block" data-close>Cancel</button>`, (el) => {
+    bindPhotoPicker(el, "cPhotos", (f) => (files = f));
+    $("#cSave", el).onclick = async () => {
+      const btn = $("#cSave", el); btn.disabled = true; btn.textContent = files.length ? "Uploading photos…" : "Saving…";
+      const completion_note = $("#cNote", el).value.trim() || null;
+      const completed_at = new Date().toISOString();
+      const { error } = await sb.from("tasks").update({ completed: true, completed_at, completion_note }).eq("id", t.id);
+      if (error) { btn.disabled = false; btn.textContent = "✓ Mark done"; return toast(error.message); }
+      Object.assign(t, { completed: true, completed_at, completion_note });
+      const ok = await uploadImages(t.id, files, "completion");
+      if (navigator.vibrate) navigator.vibrate(15);
+      closeSheet(); renderAll();
+      toast(t.penalized ? "Done — but the penalty for missing it still stands" : ok ? "Done ✓" : "Done ✓ (some photos failed)");
+    };
+  });
+}
+
+/* ---------- Photos ---------- */
+const IMAGE_QUOTA = 100 * 1024 * 1024; // 100 MB across all images
+function imagesFor(taskId, kind) {
+  const own = state.images.filter((i) => i.task_id === taskId && (!kind || i.kind === kind));
+  if (kind === "completion") return own;
+  // repeating tasks share the photos attached when the task was created
+  const t = state.tasks.find((x) => x.id === taskId);
+  if (!t?.series_id) return own;
+  const sibs = new Set(state.tasks.filter((x) => x.series_id === t.series_id).map((x) => x.id));
+  const shared = state.images.filter((i) => i.kind === "task" && sibs.has(i.task_id) && i.task_id !== taskId);
+  return kind === "task" ? [...own.filter((i) => i.kind === "task"), ...shared] : [...own, ...shared];
+}
+function imgUrl(path) { return `${SUPABASE_URL}/storage/v1/object/public/task-images/${path}`; }
+function usedBytes() { return state.images.reduce((a, i) => a + i.size, 0); }
+function fmtMB(b) { return (b / 1048576).toFixed(b < 10485760 ? 1 : 0) + " MB"; }
+
+function photoPickerHtml(id) {
+  return `<div class="field"><span>Photos (optional)</span>
+    <label class="photo-add"><input type="file" id="${id}" accept="image/*" multiple hidden>📷 Add photos</label>
+    <div class="thumbs" id="${id}Prev"></div>
+    <div class="muted" style="font-size:12px;margin-top:4px">${fmtMB(usedBytes())} of 100 MB used for all photos</div></div>`;
+}
+function bindPhotoPicker(el, id, onChange) {
+  let files = [];
+  const prev = $(`#${id}Prev`, el);
+  const draw = () => {
+    prev.innerHTML = files.map((f, i) => `<div class="thumb"><img src="${URL.createObjectURL(f)}" alt=""><button type="button" data-rm="${i}" aria-label="Remove">✕</button></div>`).join("");
+    onChange(files);
+  };
+  $(`#${id}`, el).addEventListener("change", async (e) => {
+    const picked = [...e.target.files];
+    e.target.value = "";
+    for (const f of picked) files.push(await shrinkImage(f));
+    const pending = files.reduce((a, f) => a + f.size, 0);
+    if (usedBytes() + pending > IMAGE_QUOTA) {
+      toast(`Too big — only ${fmtMB(Math.max(0, IMAGE_QUOTA - usedBytes()))} of photo space left`);
+      while (files.length && usedBytes() + files.reduce((a, f) => a + f.size, 0) > IMAGE_QUOTA) files.pop();
+    }
+    draw();
+  });
+  prev.addEventListener("click", (e) => {
+    const b = e.target.closest("[data-rm]"); if (!b) return;
+    files.splice(Number(b.dataset.rm), 1); draw();
+  });
+}
+// Resize big photos (max 1600px, JPEG) so the 100 MB lasts much longer
+async function shrinkImage(file) {
+  try {
+    if (!file.type.startsWith("image/") || file.type === "image/gif") return file;
+    const bmp = await createImageBitmap(file);
+    const scale = Math.min(1, 1600 / Math.max(bmp.width, bmp.height));
+    const c = document.createElement("canvas");
+    c.width = Math.round(bmp.width * scale); c.height = Math.round(bmp.height * scale);
+    c.getContext("2d").drawImage(bmp, 0, 0, c.width, c.height);
+    const blob = await new Promise((r) => c.toBlob(r, "image/jpeg", 0.82));
+    if (!blob || blob.size >= file.size) return file;
+    return new File([blob], file.name.replace(/\.\w+$/, "") + ".jpg", { type: "image/jpeg" });
+  } catch { return file; }
+}
+async function uploadImages(taskId, files, kind) {
+  let ok = true;
+  for (const f of files) {
+    if (usedBytes() + f.size > IMAGE_QUOTA) { toast("Photo space full (100 MB)"); return false; }
+    const ext = (f.name.split(".").pop() || "jpg").toLowerCase().replace(/[^a-z0-9]/g, "") || "jpg";
+    const path = `${taskId}/${kind}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+    const up = await sb.storage.from("task-images").upload(path, f, { contentType: f.type || "image/jpeg" });
+    if (up.error) { ok = false; console.warn(up.error); continue; }
+    const { data, error } = await sb.from("task_images").insert({ task_id: taskId, path, size: f.size, kind }).select().single();
+    if (error) { ok = false; toast(error.message); await sb.storage.from("task-images").remove([path]); continue; }
+    state.images.push(data);
+  }
+  return ok;
+}
+async function deleteImages(list) {
+  if (!list.length) return;
+  await sb.storage.from("task-images").remove(list.map((i) => i.path));
+  await sb.from("task_images").delete().in("id", list.map((i) => i.id));
+  const ids = new Set(list.map((i) => i.id));
+  state.images = state.images.filter((i) => !ids.has(i.id));
+}
+function galleryHtml(list, removable) {
+  if (!list.length) return "";
+  return `<div class="thumbs">${list.map((i) => `<div class="thumb"><a href="${imgUrl(i.path)}" target="_blank" rel="noopener"><img src="${imgUrl(i.path)}" alt="" loading="lazy"></a>${removable ? `<button type="button" data-rmimg="${i.id}" aria-label="Remove photo">✕</button>` : ""}</div>`).join("")}</div>`;
+}
+
+/* ---------- Task details pop-up ---------- */
+function openTaskDetails(id) {
+  const t = state.tasks.find((x) => x.id === id);
+  if (!t) return;
+  const today = sgDateStr();
+  const status = t.completed ? `<span class="status ok">✓ Done</span>`
+    : t.due_date < today ? `<span class="status bad">Missed${t.penalized ? " · penalty charged" : ""}</span>`
+    : `<span class="status">Not done yet</span>`;
+  const rows = [
+    ["Date", fmtDate(t.due_date, { weekday: "long", day: "numeric", month: "long", year: "numeric" })],
+    t.due_time ? ["Time", fmtTime(t.due_time)] : null,
+    ["Penalty if missed", `${t.penalty_points} pts`],
+    repeatText(t) ? ["Repeats", esc(repeatText(t))] : null,
+  ].filter(Boolean);
+  const taskImgs = imagesFor(t.id, "task"), doneImgs = imagesFor(t.id, "completion");
+  const completedAt = t.completed_at ? new Date(t.completed_at).toLocaleString("en-SG", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit", timeZone: "Asia/Singapore" }) : "";
+  const checkable = canCheck(t);
+  openSheet(`<div class="detail-head">${status}</div>
+    <h3 class="serif">${esc(t.title)}</h3>
+    <dl class="detail">${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl>
+    ${t.notes ? `<div class="sub-h">Notes</div><p class="detail-text">${esc(t.notes)}</p>` : ""}
+    ${taskImgs.length ? `<div class="sub-h">Photos</div>${galleryHtml(taskImgs)}` : ""}
+    ${t.completed ? `<div class="sub-h" style="color:var(--ok)">Completed ${completedAt}</div>
+      ${t.completion_note ? `<p class="detail-text">${esc(t.completion_note)}</p>` : ""}
+      ${galleryHtml(doneImgs)}` : ""}
+    ${state.isAdmin ? `<div class="btn-row">
+      ${checkable ? `<button type="button" class="btn ${t.completed ? "" : "primary"}" id="dCheck">${t.completed ? "Mark not done" : "✓ Mark done"}</button>` : ""}
+      <button type="button" class="btn" id="dEdit">Edit</button></div>
+      ${!checkable && isRepeat(t) && !t.completed ? `<p class="muted" style="font-size:12.5px">Repeating tasks can only be ticked on the day, in Today's tasks.</p>` : ""}` : ""}
+    <button type="button" class="btn ghost block" data-close>Close</button>`, (el) => {
+    $("#dCheck", el) && ($("#dCheck", el).onclick = () => { closeSheet(); toggleTask(t.id); });
+    $("#dEdit", el) && ($("#dEdit", el).onclick = () => openTaskSheet(t));
+  });
 }
 
 const REPEAT_LABEL = { none: "Once", daily: "Every day", weekly: "Every week", monthly: "Every month", days: "Selected days" };
@@ -524,6 +701,8 @@ function openTaskSheet(task, presetDate) {
     </div>
     <div class="muted" style="font-size:12.5px;margin-top:6px" id="fRepeatHint"></div></div>`}
     <label class="field"><span>Notes (optional)</span><textarea id="fNotes" placeholder="Details…">${esc(t.notes || "")}</textarea></label>
+    ${isEdit && imagesFor(t.id, "task").length ? `<div class="sub-h">Current photos</div><div id="fCurImgs">${galleryHtml(imagesFor(t.id, "task"), true)}</div>` : ""}
+    ${photoPickerHtml("fPhotos")}
     <button type="button" class="btn primary block" id="fSave">${isEdit ? "Save changes" : "Add task"}</button>
     ${isEdit ? `<button type="button" class="btn ghost block" id="fDelete" style="color:var(--danger)">Delete task</button>
       ${t.series_id ? `<button type="button" class="link" id="fDeleteSeries" style="color:var(--danger);display:block;margin:6px auto 0">Delete this and all future repeats</button>` : ""}` : ""}
@@ -559,6 +738,14 @@ function openTaskSheet(task, presetDate) {
       const c = state.catalogue.find((x) => x.id === b.dataset.pick);
       $("#fTitle", el).value = c.item; $("#fPts", el).value = c.points;
     });
+    let newFiles = [];
+    bindPhotoPicker(el, "fPhotos", (f) => (newFiles = f));
+    $("#fCurImgs", el)?.addEventListener("click", async (e) => {
+      const b = e.target.closest("[data-rmimg]"); if (!b) return;
+      e.preventDefault();
+      const img = state.images.find((i) => i.id === b.dataset.rmimg);
+      if (img) { await deleteImages([img]); b.closest(".thumb").remove(); renderAll(); toast("Photo removed"); }
+    });
     if (!isEdit) setTimeout(() => $("#fTitle", el).focus(), 250);
     $("#fSave", el).onclick = async () => {
       const title = $("#fTitle", el).value.trim();
@@ -576,6 +763,7 @@ function openTaskSheet(task, presetDate) {
         const { error } = await sb.from("tasks").update(base).eq("id", t.id);
         if (error) { $("#fSave", el).disabled = false; return toast(error.message); }
         Object.assign(task, base);
+        if (newFiles.length) { $("#fSave", el).textContent = "Uploading photos…"; await uploadImages(t.id, newFiles, "task"); }
         toast("Task updated");
       } else {
         let rows;
@@ -596,17 +784,22 @@ function openTaskSheet(task, presetDate) {
         if (error) { $("#fSave", el).disabled = false; return toast(error.message); }
         state.tasks.push(...data);
         state.tasks.sort((a, b) => a.due_date.localeCompare(b.due_date));
+        // photos are stored once (on the first day) and shown on every repeat
+        if (newFiles.length) { $("#fSave", el).textContent = "Uploading photos…"; await uploadImages(data[0].id, newFiles, "task"); }
         toast(rows.length > 1 ? `${rows.length} tasks added` : "Task added");
       }
       closeSheet(); renderAll();
     };
     $("#fDelete", el) && ($("#fDelete", el).onclick = async () => {
+      await deleteImages(state.images.filter((i) => i.task_id === t.id));
       const { error } = await sb.from("tasks").delete().eq("id", t.id);
       if (error) return toast(error.message);
       state.tasks = state.tasks.filter((x) => x.id !== t.id);
       closeSheet(); renderAll(); toast("Task deleted");
     });
     $("#fDeleteSeries", el) && ($("#fDeleteSeries", el).onclick = async () => {
+      const gone = new Set(state.tasks.filter((x) => x.series_id === t.series_id && x.due_date >= t.due_date).map((x) => x.id));
+      await deleteImages(state.images.filter((i) => gone.has(i.task_id)));
       const { error } = await sb.from("tasks").delete().eq("series_id", t.series_id).gte("due_date", t.due_date);
       if (error) return toast(error.message);
       await sb.from("task_series").update({ active: false }).eq("id", t.series_id);
@@ -812,6 +1005,7 @@ async function openSettings() {
     <div class="setting"><div><b>Phone notifications</b><small>${subscribed ? "On for this device" : "Off for this device"}</small></div>
       ${subscribed ? `<button type="button" class="btn small" id="sOff">Turn off</button>` : `<button type="button" class="btn small primary" id="sOn">Turn on</button>`}</div>
     ${iosHelp}
+    <div class="setting"><div><b>Photo storage</b><small>${fmtMB(usedBytes())} of 100 MB used</small></div></div>
     <div class="setting"><div><b>Reminder schedule</b><small>Hourly for unchecked tasks · Weekdays 9pm–12am · Weekends 12pm–12am (Singapore time). Threshold alerts are sent straight away.</small></div></div>
     ${subscribed ? `<div class="setting"><div><b>Send a reminder now</b><small>Test what the hourly reminder looks like</small></div><button type="button" class="btn small" id="sTest">Send</button></div>` : ""}
     <div class="setting"><div><b>How penalties work</b><small>A task still unchecked after midnight on its date adds its penalty points automatically. You can also add points by hand.</small></div></div>
