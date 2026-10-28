@@ -5,7 +5,7 @@ const VAPID_PUBLIC = "BJd0pVUgBPkI3t2OEexmrDiuDdxLtn6BavlNkpm8lBhuepe3vP9u4LUCXb
 
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 const OWNER = "00000000-0000-0000-0000-000000000001"; // one shared, public tracker
-const APP_VERSION = "9"; // bump together with version.json on every release
+const APP_VERSION = "10"; // bump together with version.json on every release
 const $ = (s, el = document) => el.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
@@ -618,6 +618,13 @@ function galleryHtml(list, removable) {
 }
 
 /* ---------- Task details pop-up ---------- */
+// escape text, then turn web addresses into tappable links
+function linkify(text) {
+  return esc(text).replace(/\b((?:https?:\/\/|www\.)[^\s<]+[^\s<.,;:!?)\]'"])/gi, (m) => {
+    const href = m.startsWith("www.") ? "https://" + m : m;
+    return `<a href="${href}" target="_blank" rel="noopener noreferrer" class="text-link">${m}</a>`;
+  });
+}
 function openTaskDetails(id) {
   const t = state.tasks.find((x) => x.id === id);
   if (!t) return;
@@ -639,10 +646,10 @@ function openTaskDetails(id) {
   openSheet(`<div class="detail-head">${status}</div>
     <h3 class="serif">${esc(t.title)}</h3>
     <dl class="detail">${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl>
-    ${t.notes ? `<div class="sub-h">Notes</div><p class="detail-text">${esc(t.notes)}</p>` : ""}
+    ${t.notes ? `<div class="sub-h">Notes</div><p class="detail-text">${linkify(t.notes)}</p>` : ""}
     ${taskImgs.length ? `<div class="sub-h">Photos</div>${galleryHtml(taskImgs)}` : ""}
     ${t.completed ? `<div class="sub-h" style="color:var(--ok)">Completed ${completedAt}</div>
-      ${t.completion_note ? `<p class="detail-text">${esc(t.completion_note)}</p>` : ""}
+      ${t.completion_note ? `<p class="detail-text">${linkify(t.completion_note)}</p>` : ""}
       ${galleryHtml(doneImgs)}` : ""}
     ${state.isAdmin ? `<div class="btn-row">
       ${checkable ? `<button type="button" class="btn ${t.completed ? "" : "primary"}" id="dCheck">${t.completed ? "Mark not done" : "✓ Mark done"}</button>` : ""}
