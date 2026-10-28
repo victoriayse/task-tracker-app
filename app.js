@@ -5,6 +5,7 @@ const VAPID_PUBLIC = "BJd0pVUgBPkI3t2OEexmrDiuDdxLtn6BavlNkpm8lBhuepe3vP9u4LUCXb
 
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 const OWNER = "00000000-0000-0000-0000-000000000001"; // one shared, public tracker
+const APP_VERSION = "8"; // bump together with version.json on every release
 const $ = (s, el = document) => el.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
@@ -152,6 +153,7 @@ async function boot() {
   renderAll();
   registerSW();
   subscribeRealtime();
+  checkForUpdate();
 }
 
 let rtChannel;
@@ -1009,6 +1011,31 @@ async function deleteRow(table, key, id) {
   renderAll();
   if (key === "thresholds") pingThreshold();
 }
+
+/* ---------- Update check ---------- */
+let updateShown = false;
+async function checkForUpdate() {
+  if (updateShown) return;
+  try {
+    const r = await fetch("version.json?t=" + Date.now(), { cache: "no-store" });
+    if (!r.ok) return;
+    const { version, notes } = await r.json();
+    if (!version || String(version) === APP_VERSION) return;
+    updateShown = true;
+    const bar = document.createElement("div");
+    bar.className = "update-pop";
+    bar.innerHTML = `<div class="up-card" role="alertdialog" aria-live="polite">
+      <div class="up-icon">✨</div>
+      <div class="up-text"><b>New version available</b><small>${esc(notes || "Update to get the latest features and fixes.")}</small></div>
+      <div class="up-actions"><button type="button" class="btn small ghost" id="upLater">Later</button>
+      <button type="button" class="btn small primary" id="upNow">Update now</button></div></div>`;
+    document.body.appendChild(bar);
+    $("#upNow").onclick = () => { const u = new URL(location.href); u.searchParams.set("v", version); location.replace(u.toString()); };
+    $("#upLater").onclick = () => { bar.remove(); setTimeout(() => { updateShown = false; }, 30 * 60e3); };
+  } catch {}
+}
+setInterval(checkForUpdate, 5 * 60e3);
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") checkForUpdate(); });
 
 /* ---------- Admin ---------- */
 function RO() { return state.isAdmin ? "" : "readonly"; }

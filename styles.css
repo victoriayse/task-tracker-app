@@ -198,3 +198,10 @@ input[readonly]{background:transparent;border-color:transparent;padding-left:4px
 .detail-text{white-space:pre-wrap;margin:4px 0 8px;font-size:15px}
 
 .chip.span{opacity:.6;font-weight:500}
+
+/* Update pop-up */
+.update-pop{position:fixed;left:0;right:0;top:calc(12px + var(--safe-t));z-index:70;display:flex;justify-content:center;padding:0 12px;animation:fade .25s}
+.up-card{width:100%;max-width:520px;background:var(--card);border-radius:18px;box-shadow:0 10px 40px rgba(0,0,0,.25);padding:14px;display:grid;grid-template-columns:auto 1fr;gap:4px 12px;align-items:center;border:1.5px solid var(--accent)}
+.up-icon{font-size:26px;grid-row:span 2}
+.up-text small{display:block;color:var(--muted);font-size:13px;margin-top:2px}
+.up-actions{grid-column:2;display:flex;gap:8px;justify-content:flex-end;margin-top:6px}
