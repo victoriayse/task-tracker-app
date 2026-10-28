@@ -5,7 +5,7 @@ const VAPID_PUBLIC = "BJd0pVUgBPkI3t2OEexmrDiuDdxLtn6BavlNkpm8lBhuepe3vP9u4LUCXb
 
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 const OWNER = "00000000-0000-0000-0000-000000000001"; // one shared, public tracker
-const APP_VERSION = "11"; // bump together with version.json on every release
+const APP_VERSION = "12"; // bump together with version.json on every release
 const $ = (s, el = document) => el.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
@@ -234,7 +234,7 @@ function taskRow(t, showDate) {
   const checkable = canCheck(t);
   const box = checkable || !state.isAdmin
     ? `<button type="button" class="check${t.completed ? " on" : ""}" data-check="${t.id}" ${checkable ? "" : "disabled"} aria-label="${t.completed ? "Mark not done" : "Mark done"}">${t.completed ? "✓" : ""}</button>`
-    : `<span class="check locked${t.completed ? " on" : ""}" title="Repeating tasks can only be ticked on the day, in Today's tasks">${t.completed ? "✓" : "🔁"}</span>`;
+    : `<span class="check locked${t.completed ? " on" : ""}" title="Repeating tasks can't be ticked before their day">${t.completed ? "✓" : "🔁"}</span>`;
   return `<div class="task${t.completed ? " done" : ""}" data-task="${t.id}">
     ${box}
     <div class="task-main" data-open="${t.id}">
@@ -502,13 +502,13 @@ function rangeDay(t, d) {
   return { day: n(t.start_date, d) + 1, of: n(t.start_date, t.due_date) + 1 };
 }
 function isRepeat(t) { return !!t.series_id || (t.repeat && t.repeat !== "none"); }
-// Repeating tasks can only be ticked on their own day (i.e. from Today's tasks)
-function canCheck(t) { return state.isAdmin && (!isRepeat(t) || t.due_date === sgDateStr()); }
+// Repeating tasks can be ticked on their day or afterwards (admin override for overdue) — not ahead of time
+function canCheck(t) { return state.isAdmin && (!isRepeat(t) || t.due_date <= sgDateStr()); }
 
 async function toggleTask(id) {
   const t = state.tasks.find((x) => x.id === id);
   if (!t) return;
-  if (!canCheck(t)) return toast("Repeating tasks can only be ticked on the day, in Today's tasks");
+  if (!canCheck(t)) return toast("Repeating tasks can't be ticked before their day");
   if (!t.completed) return openCompleteSheet(t);
   // un-tick (keeps any photos/notes already saved)
   t.completed = false; t.completed_at = null; renderAll();
@@ -518,8 +518,12 @@ async function toggleTask(id) {
 
 function openCompleteSheet(t) {
   let files = [];
+  const charged = state.entries.filter((e) => e.task_id === t.id);
+  const chargedPts = charged.reduce((a, e) => a + e.points, 0);
+  const overdue = t.due_date < sgDateStr();
   openSheet(`<h3 class="serif">Mark as done</h3>
-    <p class="muted" style="margin:0 0 4px">${esc(t.title)} · ${relDay(t.due_date)}</p>
+    <p class="muted" style="margin:0 0 4px">${esc(t.title)} · ${relDay(t.due_date)}${overdue ? ` <span class="status bad">Overdue</span>` : ""}</p>
+    ${chargedPts ? `<div class="note"><label class="check-line"><input type="checkbox" id="cRefund" checked> Also remove the ${chargedPts} penalty point${chargedPts === 1 ? "" : "s"} charged for missing it</label></div>` : overdue ? `<div class="note">Admin override: this marks an overdue task as done.</div>` : ""}
     <label class="field"><span>Notes (optional)</span><textarea id="cNote" placeholder="How did it go?">${esc(t.completion_note || "")}</textarea></label>
     ${photoPickerHtml("cPhotos")}
     <button type="button" class="btn primary block" id="cSave">✓ Mark done</button>
@@ -532,10 +536,17 @@ function openCompleteSheet(t) {
       const { error } = await sb.from("tasks").update({ completed: true, completed_at, completion_note }).eq("id", t.id);
       if (error) { btn.disabled = false; btn.textContent = "✓ Mark done"; return toast(error.message); }
       Object.assign(t, { completed: true, completed_at, completion_note });
+      let refunded = 0;
+      if (chargedPts && $("#cRefund", el)?.checked) {
+        const ids = charged.map((e) => e.id);
+        const { error: re } = await sb.from("penalty_entries").delete().in("id", ids);
+        if (re) toast(re.message);
+        else { refunded = chargedPts; state.entries = state.entries.filter((e) => !ids.includes(e.id)); pingThreshold(); }
+      }
       const ok = await uploadImages(t.id, files, "completion");
       if (navigator.vibrate) navigator.vibrate(15);
       closeSheet(); renderAll();
-      toast(t.penalized ? "Done — but the penalty for missing it still stands" : ok ? "Done ✓" : "Done ✓ (some photos failed)");
+      toast(refunded ? `Done ✓ — ${refunded} penalty pts removed` : t.penalized ? "Done — the penalty for missing it still stands" : ok ? "Done ✓" : "Done ✓ (some photos failed)");
     };
   });
 }
@@ -664,7 +675,7 @@ function openTaskDetails(id) {
       ${checkable ? `<button type="button" class="btn ${t.completed ? "" : "primary"}" id="dCheck">${t.completed ? "Mark not done" : "✓ Mark done"}</button>` : ""}
       <button type="button" class="btn" id="dEdit">Edit</button></div>
       <button type="button" class="link" id="dManage" style="color:var(--danger)">Archive or delete…</button>
-      ${!checkable && isRepeat(t) && !t.completed ? `<p class="muted" style="font-size:12.5px">Repeating tasks can only be ticked on the day, in Today's tasks.</p>` : ""}` : ""}
+      ${!checkable && isRepeat(t) && !t.completed ? `<p class="muted" style="font-size:12.5px">Repeating tasks can't be ticked before their day.</p>` : ""}` : ""}
     <button type="button" class="btn ghost block" data-close>Close</button>`, (el) => {
     $("#dCheck", el) && ($("#dCheck", el).onclick = () => { closeSheet(); toggleTask(t.id); });
     $("#dEdit", el) && ($("#dEdit", el).onclick = () => openTaskSheet(t));

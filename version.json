@@ -1,1 +1,1 @@
-{ "version": "11", "notes": "Hourly reminders from a chosen time, penalty alerts, Threshold tab first, and a view/edit switch for admin." }
+{ "version": "12", "notes": "Admin can tick off overdue tasks (and remove their penalty)." }
