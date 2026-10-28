@@ -5,7 +5,7 @@ const VAPID_PUBLIC = "BJd0pVUgBPkI3t2OEexmrDiuDdxLtn6BavlNkpm8lBhuepe3vP9u4LUCXb
 
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 const OWNER = "00000000-0000-0000-0000-000000000001"; // one shared, public tracker
-const APP_VERSION = "8"; // bump together with version.json on every release
+const APP_VERSION = "9"; // bump together with version.json on every release
 const $ = (s, el = document) => el.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
@@ -238,7 +238,13 @@ function taskRow(t, showDate) {
       <div class="task-title">${esc(t.title)}</div>
       ${meta.length ? `<div class="task-meta">${meta.join("")}</div>` : ""}
     </div>
-    ${t.penalty_points ? `<span class="pts">−${t.penalty_points}</span>` : ""}
+    <div class="task-side">
+      ${t.penalty_points ? `<span class="pts">−${t.penalty_points}</span>` : ""}
+      ${state.isAdmin ? `<div class="row-actions">
+        <button type="button" class="mini-btn" data-edittask="${t.id}" aria-label="Edit task" title="Edit">✎</button>
+        <button type="button" class="mini-btn del" data-deltask="${t.id}" aria-label="Delete task" title="Delete">🗑</button>
+      </div>` : ""}
+    </div>
   </div>`;
 }
 
@@ -417,9 +423,11 @@ $("#sections").addEventListener("click", async (e) => {
     state.collapsed[sec] = !state.collapsed[sec];
     lsSet("tt_collapsed", state.collapsed); renderAll(); return;
   }
-  const WRITE = d.check || d.edit || d.addon || d.delcat || d.delth || d.delentry || d.move || ["addCat", "addTh", "addPenalty", "served"].includes(d.act);
+  const WRITE = d.edittask || d.deltask || d.check || d.edit || d.addon || d.delcat || d.delth || d.delentry || d.move || ["addCat", "addTh", "addPenalty", "served"].includes(d.act);
   if (WRITE && !state.isAdmin) return toast("View only — admin sign-in needed to make changes");
   if (d.check) return toggleTask(d.check);
+  if (d.edittask) return openTaskSheet(state.tasks.find((x) => x.id === d.edittask));
+  if (d.deltask) return confirmDelete(state.tasks.find((x) => x.id === d.deltask));
   if (d.open) return openTaskDetails(d.open);
   if (d.day) { state.calSel = d.day; renderAll(); return; }
   if (d.cal) {
@@ -869,6 +877,23 @@ function openManageSheet(t) {
     $("#mArchAll", el) && ($("#mArchAll", el).onclick = () => archiveTasks(future, t.series_id));
     confirmTap($("#mDel", el), () => deleteTasks([t]));
     $("#mDelAll", el) && confirmTap($("#mDelAll", el), () => deleteTasks(future, t.series_id));
+  });
+}
+function confirmDelete(t) {
+  if (!t) return;
+  const future = t.series_id ? seriesFuture(t) : [t];
+  const nImg = state.images.filter((i) => future.some((x) => x.id === i.task_id)).length;
+  openSheet(`<h3 class="serif">Delete this task?</h3>
+    <p style="margin:4px 0 2px"><b>${esc(t.title)}</b></p>
+    <p class="muted" style="margin:0 0 10px">${isRange(t) ? rangeText(t) : relDay(t.due_date)}${t.series_id ? " · 🔁 " + esc(repeatText(t)) : ""}</p>
+    <div class="note" style="background:var(--danger-soft);color:var(--danger)">This can't be undone. The task${imagesFor(t.id).length || nImg ? " and its photos" : ""} will be removed for good. Penalty points already charged stay in your total.</div>
+    <button type="button" class="btn danger block" id="cdOne">Yes, delete ${t.series_id && future.length > 1 ? "this day only" : "task"}</button>
+    ${t.series_id && future.length > 1 ? `<button type="button" class="btn block" id="cdAll" style="color:var(--danger)">Delete this and all future repeats (${future.length})</button>` : ""}
+    <button type="button" class="btn ghost block" id="cdArch">Archive instead</button>
+    <button type="button" class="btn ghost block" data-close>Cancel</button>`, (el) => {
+    $("#cdOne", el).onclick = () => deleteTasks([t]);
+    $("#cdAll", el) && ($("#cdAll", el).onclick = () => deleteTasks(future, t.series_id));
+    $("#cdArch", el).onclick = () => archiveTasks([t]);
   });
 }
 async function stopSeries(seriesId) {

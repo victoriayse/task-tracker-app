@@ -205,3 +205,10 @@ input[readonly]{background:transparent;border-color:transparent;padding-left:4px
 .up-icon{font-size:26px;grid-row:span 2}
 .up-text small{display:block;color:var(--muted);font-size:13px;margin-top:2px}
 .up-actions{grid-column:2;display:flex;gap:8px;justify-content:flex-end;margin-top:6px}
+
+/* Row edit/delete */
+.task-side{flex:none;display:flex;flex-direction:column;align-items:flex-end;gap:6px}
+.row-actions{display:flex;gap:4px}
+.mini-btn{width:32px;height:32px;border-radius:9px;border:1.5px solid var(--line);background:var(--card);font-size:14px;display:grid;place-items:center;padding:0;color:var(--muted)}
+.mini-btn.del{color:var(--danger)}
+.mini-btn:active{transform:scale(.95)}
