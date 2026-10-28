@@ -22,6 +22,7 @@ const state = {
   tasks: [],
   series: [],
   images: [],
+  archived: [],
   entries: [],
   catalogue: [],
   thresholds: [],
@@ -103,7 +104,8 @@ async function loadAll() {
   const err = [t, e, c, th, st, se, im].find((r) => r.error);
   state.images = im.data || [];
   if (err) toast("Couldn't load: " + err.error.message);
-  state.tasks = t.data || [];
+  state.archived = (t.data || []).filter((x) => x.archived).sort((a, b) => (b.archived_at || "").localeCompare(a.archived_at || ""));
+  state.tasks = (t.data || []).filter((x) => !x.archived);
   state.entries = e.data || [];
   state.catalogue = c.data || [];
   state.thresholds = th.data || [];
@@ -186,7 +188,7 @@ function renderAll() {
 function headExtra(k) {
   const t = sgDateStr();
   if (k === "today") {
-    const list = state.tasks.filter((x) => x.due_date === t);
+    const list = state.tasks.filter((x) => activeOn(x, t));
     return list.length ? `<span class="count">${list.filter((x) => x.completed).length}/${list.length}</span>` : "";
   }
   if (k === "due") {
@@ -210,7 +212,12 @@ function taskRow(t, showDate) {
   const today = sgDateStr();
   const late = !t.completed && t.due_date < today;
   const meta = [];
-  if (showDate) meta.push(`<span class="${late ? "late" : ""}">${late ? "Overdue · " : ""}${relDay(t.due_date)}</span>`);
+  if (isRange(t)) {
+    if (!t.completed && !late && t.due_date === today) meta.push(`<span class="late">Due today</span>`);
+    else if (showDate || late) meta.push(`<span class="${late ? "late" : ""}">${late ? "Overdue · due " : "Due "}${relDay(t.due_date)}</span>`);
+    const r = activeOn(t, today) ? rangeDay(t, today) : null;
+    meta.push(`<span>📅 ${rangeText(t)}${r && !t.completed ? ` · day ${r.day} of ${r.of}` : ""}</span>`);
+  } else if (showDate) meta.push(`<span class="${late ? "late" : ""}">${late ? "Overdue · " : ""}${relDay(t.due_date)}</span>`);
   if (t.due_time) meta.push(`<span>🕒 ${fmtTime(t.due_time)}</span>`);
   const rt = repeatText(t);
   if (rt) meta.push(`<span>🔁 ${esc(rt)}</span>`);
@@ -235,12 +242,13 @@ function taskRow(t, showDate) {
 
 function renderToday() {
   const t = sgDateStr();
-  const list = state.tasks.filter((x) => x.due_date === t)
-    .sort((a, b) => (a.completed - b.completed));
+  const list = state.tasks.filter((x) => activeOn(x, t) && !(isRange(x) && x.completed && x.due_date !== t && x.completed_at && sgDateStr(new Date(x.completed_at)) < t))
+    .sort((a, b) => (a.completed - b.completed) || a.due_date.localeCompare(b.due_date));
   if (!list.length) return `<div class="empty">Nothing scheduled for today.${state.isAdmin ? " Tap ＋ to add a task." : ""}</div>`;
   const done = list.filter((x) => x.completed).length;
-  const atStake = list.filter((x) => !x.completed).reduce((a, x) => a + x.penalty_points, 0);
-  return `<div class="progress-line">${done} of ${list.length} done${atStake ? ` · <b style="color:var(--danger)">${atStake} pts at stake</b> by midnight` : " · all clear 🎉"}</div>
+  const atStake = list.filter((x) => !x.completed && x.due_date === t).reduce((a, x) => a + x.penalty_points, 0);
+  const later = list.filter((x) => !x.completed && x.due_date > t).length;
+  return `<div class="progress-line">${done} of ${list.length} done${atStake ? ` · <b style="color:var(--danger)">${atStake} pts at stake</b> by midnight` : later ? "" : " · all clear 🎉"}${later ? ` · ${later} due later` : ""}</div>
     ${list.map((x) => taskRow(x, false)).join("")}`;
 }
 
@@ -282,7 +290,10 @@ function renderCalendar() {
   const start = addDays(first, -startOffset);
   const today = sgDateStr();
   const byDay = {};
-  state.tasks.forEach((t) => (byDay[t.due_date] = byDay[t.due_date] || []).push(t));
+  state.tasks.forEach((t) => {
+    if (!isRange(t)) return (byDay[t.due_date] = byDay[t.due_date] || []).push(t);
+    for (let d = t.start_date; d <= t.due_date; d = addDays(d, 1)) (byDay[d] = byDay[d] || []).push(t);
+  });
   const title = new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString("en-SG", { month: "long", year: "numeric", timeZone: "UTC" });
   let cells = "";
   for (let i = 0; i < 42; i++) {
@@ -290,7 +301,7 @@ function renderCalendar() {
     if (i === 35 && d.slice(0, 7) !== state.calMonth) break;
     const list = byDay[d] || [];
     const chips = list.slice(0, 2).map((t) => {
-      const cls = t.completed ? "done" : d < today ? "missed" : "";
+      const cls = (t.completed ? "done" : t.due_date < today && d <= t.due_date && d < today ? "missed" : "") + (isRange(t) && d !== t.due_date ? " span" : "");
       return `<span class="chip ${cls}" data-open="${t.id}">${esc(t.title)}</span>`;
     }).join("");
     const more = list.length > 2 ? `<span class="chip-more">+${list.length - 2}</span>` : "";
@@ -464,6 +475,14 @@ $("#btnArrange").onclick = () => { state.arranging = !state.arranging; $("#arran
 $("#btnArrangeDone").onclick = () => { state.arranging = false; $("#arrangeBar").classList.add("hidden"); renderAll(); toast("Layout saved"); };
 
 /* ---------- Tasks ---------- */
+function isRange(t) { return !!t.start_date && t.start_date < t.due_date; }
+// is the task "on" for a given day? (its due day, or any day inside its from–to range)
+function activeOn(t, d) { return isRange(t) ? t.start_date <= d && d <= t.due_date : t.due_date === d; }
+function rangeText(t) { return `${fmtDate(t.start_date, { day: "numeric", month: "short" })} – ${fmtDate(t.due_date, { day: "numeric", month: "short" })}`; }
+function rangeDay(t, d) {
+  const n = (a, b) => Math.round((new Date(b + "T00:00:00Z") - new Date(a + "T00:00:00Z")) / 864e5);
+  return { day: n(t.start_date, d) + 1, of: n(t.start_date, t.due_date) + 1 };
+}
 function isRepeat(t) { return !!t.series_id || (t.repeat && t.repeat !== "none"); }
 // Repeating tasks can only be ticked on their own day (i.e. from Today's tasks)
 function canCheck(t) { return state.isAdmin && (!isRepeat(t) || t.due_date === sgDateStr()); }
@@ -597,7 +616,9 @@ function openTaskDetails(id) {
     : t.due_date < today ? `<span class="status bad">Missed${t.penalized ? " · penalty charged" : ""}</span>`
     : `<span class="status">Not done yet</span>`;
   const rows = [
-    ["Date", fmtDate(t.due_date, { weekday: "long", day: "numeric", month: "long", year: "numeric" })],
+    isRange(t)
+      ? ["Time range", `${fmtDate(t.start_date, { weekday: "short", day: "numeric", month: "short" })} → ${fmtDate(t.due_date, { weekday: "short", day: "numeric", month: "short" })} <span class="muted">(due on the last day)</span>`]
+      : ["Due date", fmtDate(t.due_date, { weekday: "long", day: "numeric", month: "long", year: "numeric" })],
     t.due_time ? ["Time", fmtTime(t.due_time)] : null,
     ["Penalty if missed", `${t.penalty_points} pts`],
     repeatText(t) ? ["Repeats", esc(repeatText(t))] : null,
@@ -616,10 +637,12 @@ function openTaskDetails(id) {
     ${state.isAdmin ? `<div class="btn-row">
       ${checkable ? `<button type="button" class="btn ${t.completed ? "" : "primary"}" id="dCheck">${t.completed ? "Mark not done" : "✓ Mark done"}</button>` : ""}
       <button type="button" class="btn" id="dEdit">Edit</button></div>
+      <button type="button" class="link" id="dManage" style="color:var(--danger)">Archive or delete…</button>
       ${!checkable && isRepeat(t) && !t.completed ? `<p class="muted" style="font-size:12.5px">Repeating tasks can only be ticked on the day, in Today's tasks.</p>` : ""}` : ""}
     <button type="button" class="btn ghost block" data-close>Close</button>`, (el) => {
     $("#dCheck", el) && ($("#dCheck", el).onclick = () => { closeSheet(); toggleTask(t.id); });
     $("#dEdit", el) && ($("#dEdit", el).onclick = () => openTaskSheet(t));
+    $("#dManage", el) && ($("#dManage", el).onclick = () => openManageSheet(t));
   });
 }
 
@@ -686,15 +709,22 @@ function openTaskSheet(task, presetDate) {
   const t = task || { title: "", notes: "", due_date: presetDate || sgDateStr(), due_time: null, penalty_points: 5, repeat: "none" };
   let repeat = "none";
   let days = [dow(t.due_date)];
+  let mode = isRange(t) ? "range" : "one";
   openSheet(`<h3 class="serif">${isEdit ? "Edit task" : "New task"}</h3>
     <label class="field"><span>Task</span><input id="fTitle" type="text" value="${esc(t.title)}" placeholder="e.g. Submit report" maxlength="120"></label>
     ${quickPicks()}
+    ${t.series_id ? "" : `<div class="field"><span>When</span><div class="seg" id="fWhen">
+      <button type="button" data-w="one" class="${mode === "one" ? "on" : ""}">One due date</button>
+      <button type="button" data-w="range" class="${mode === "range" ? "on" : ""}">Time range</button>
+    </div></div>`}
     <div class="row">
-      <label class="field"><span>Date</span><input id="fDate" type="date" value="${t.due_date}"></label>
-      <label class="field"><span>Time (optional)</span><input id="fTime" type="time" value="${t.due_time ? t.due_time.slice(0, 5) : ""}"></label>
+      <label class="field ${mode === "range" ? "" : "hidden"}" id="fStartWrap"><span>From</span><input id="fStart" type="date" value="${t.start_date || t.due_date}"></label>
+      <label class="field"><span id="fDateLbl">${mode === "range" ? "To (due day)" : "Due date"}</span><input id="fDate" type="date" value="${t.due_date}"></label>
     </div>
+    <label class="field"><span>Time (optional)</span><input id="fTime" type="time" value="${t.due_time ? t.due_time.slice(0, 5) : ""}"></label>
+    <div class="muted ${mode === "range" ? "" : "hidden"}" id="fRangeHint" style="font-size:12.5px;margin-top:6px">Reminder at 12pm every day in the range, then hourly 7pm–11pm on the due day. Tick it off any day in the range.</div>
     <label class="field"><span>Penalty points if missed</span><input id="fPts" type="number" inputmode="numeric" min="0" value="${t.penalty_points}"></label>
-    ${isEdit ? (t.series_id ? `<div class="note">🔁 Repeats: ${esc(repeatText(t))}. Changes here apply to this day only.</div>` : "") : `<div class="field"><span>Repeat</span><div class="seg" id="fRepeat">
+    ${isEdit ? (t.series_id ? `<div class="note">🔁 Repeats: ${esc(repeatText(t))}. Changes here apply to this day only.</div>` : "") : `<div class="field ${mode === "range" ? "hidden" : ""}" id="fRepeatWrap"><span>Repeat</span><div class="seg" id="fRepeat">
       ${Object.entries(REPEAT_LABEL).map(([k, v]) => `<button type="button" data-r="${k}" class="${k === repeat ? "on" : ""}">${v}</button>`).join("")}
     </div>
     <div class="seg hidden" id="fDays" style="margin-top:8px">
@@ -705,8 +735,7 @@ function openTaskSheet(task, presetDate) {
     ${isEdit && imagesFor(t.id, "task").length ? `<div class="sub-h">Current photos</div><div id="fCurImgs">${galleryHtml(imagesFor(t.id, "task"), true)}</div>` : ""}
     ${photoPickerHtml("fPhotos")}
     <button type="button" class="btn primary block" id="fSave">${isEdit ? "Save changes" : "Add task"}</button>
-    ${isEdit ? `<button type="button" class="btn ghost block" id="fDelete" style="color:var(--danger)">Delete task</button>
-      ${t.series_id ? `<button type="button" class="link" id="fDeleteSeries" style="color:var(--danger);display:block;margin:6px auto 0">Delete this and all future repeats</button>` : ""}` : ""}
+    ${isEdit ? `<button type="button" class="btn ghost block" id="fManage" style="color:var(--danger)">Archive or delete…</button>` : ""}
   `, (el) => {
     const hint = () => {
       const h = $("#fRepeatHint", el); if (!h) return;
@@ -723,6 +752,20 @@ function openTaskSheet(task, presetDate) {
     };
     hint();
     $("#fDate", el).addEventListener("change", hint);
+    $("#fWhen", el)?.addEventListener("click", (e) => {
+      const b = e.target.closest("[data-w]"); if (!b) return;
+      mode = b.dataset.w;
+      el.querySelectorAll("#fWhen button").forEach((x) => x.classList.toggle("on", x === b));
+      $("#fStartWrap", el).classList.toggle("hidden", mode !== "range");
+      $("#fRangeHint", el).classList.toggle("hidden", mode !== "range");
+      $("#fRepeatWrap", el)?.classList.toggle("hidden", mode === "range");
+      $("#fDateLbl", el).textContent = mode === "range" ? "To (due day)" : "Due date";
+      if (mode === "range") {
+        repeat = "none";
+        el.querySelectorAll("#fRepeat button").forEach((x) => x.classList.toggle("on", x.dataset.r === "none")); hint();
+        if ($("#fStart", el).value >= $("#fDate", el).value) $("#fDate", el).value = addDays($("#fStart", el).value, 6);
+      }
+    });
     $("#fRepeat", el)?.addEventListener("click", (e) => {
       const b = e.target.closest("[data-r]"); if (!b) return;
       repeat = b.dataset.r;
@@ -751,9 +794,16 @@ function openTaskSheet(task, presetDate) {
     $("#fSave", el).onclick = async () => {
       const title = $("#fTitle", el).value.trim();
       if (!title) return toast("Give the task a name");
+      const dueVal = $("#fDate", el).value || sgDateStr();
+      let start_date = null;
+      if (mode === "range") {
+        start_date = $("#fStart", el).value || sgDateStr();
+        if (start_date >= dueVal) return toast("The 'To' date must be after the 'From' date");
+      }
       const base = {
         title,
-        due_date: $("#fDate", el).value || sgDateStr(),
+        ...(t.series_id ? {} : { start_date }),
+        due_date: dueVal,
         due_time: $("#fTime", el).value || null,
         penalty_points: Math.max(0, parseInt($("#fPts", el).value || "0", 10)),
         notes: $("#fNotes", el).value.trim() || null,
@@ -791,22 +841,97 @@ function openTaskSheet(task, presetDate) {
       }
       closeSheet(); renderAll();
     };
-    $("#fDelete", el) && ($("#fDelete", el).onclick = async () => {
-      await deleteImages(state.images.filter((i) => i.task_id === t.id));
-      const { error } = await sb.from("tasks").delete().eq("id", t.id);
-      if (error) return toast(error.message);
-      state.tasks = state.tasks.filter((x) => x.id !== t.id);
-      closeSheet(); renderAll(); toast("Task deleted");
-    });
-    $("#fDeleteSeries", el) && ($("#fDeleteSeries", el).onclick = async () => {
-      const gone = new Set(state.tasks.filter((x) => x.series_id === t.series_id && x.due_date >= t.due_date).map((x) => x.id));
-      await deleteImages(state.images.filter((i) => gone.has(i.task_id)));
-      const { error } = await sb.from("tasks").delete().eq("series_id", t.series_id).gte("due_date", t.due_date);
-      if (error) return toast(error.message);
-      await sb.from("task_series").update({ active: false }).eq("id", t.series_id);
-      const s = state.series.find((x) => x.id === t.series_id); if (s) s.active = false;
-      state.tasks = state.tasks.filter((x) => !(x.series_id === t.series_id && x.due_date >= t.due_date));
-      closeSheet(); renderAll(); toast("Repeats deleted");
+    $("#fManage", el) && ($("#fManage", el).onclick = () => openManageSheet(t));
+  });
+}
+
+/* ---------- Archive / delete ---------- */
+function seriesFuture(t) { return state.tasks.filter((x) => x.series_id === t.series_id && x.due_date >= t.due_date); }
+function openManageSheet(t) {
+  const future = t.series_id ? seriesFuture(t) : [t];
+  openSheet(`<h3 class="serif">Archive or delete</h3>
+    <p class="muted" style="margin:0 0 6px">${esc(t.title)} · ${isRange(t) ? rangeText(t) : relDay(t.due_date)}</p>
+    <p class="muted" style="font-size:13.5px;margin:0 0 4px"><b>Archive</b> hides the task — no reminders, no penalty — and you can restore it from ⚙︎ → Archived tasks. <b>Delete</b> removes it and its photos for good.</p>
+    <button type="button" class="btn block" id="mArch">🗄️ Archive this task</button>
+    ${t.series_id && future.length > 1 ? `<button type="button" class="btn block" id="mArchAll">🗄️ Archive this and all future repeats (${future.length})</button>` : ""}
+    <button type="button" class="btn block" id="mDel" style="color:var(--danger)">🗑️ Delete this task</button>
+    ${t.series_id && future.length > 1 ? `<button type="button" class="btn block" id="mDelAll" style="color:var(--danger)">🗑️ Delete this and all future repeats (${future.length})</button>` : ""}
+    <button type="button" class="btn ghost block" data-close>Cancel</button>`, (el) => {
+    const confirmTap = (btn, fn) => {
+      btn.onclick = () => {
+        if (btn.dataset.armed) return fn();
+        btn.dataset.armed = "1"; btn.textContent = "Tap again to confirm delete"; btn.classList.add("danger");
+      };
+    };
+    $("#mArch", el).onclick = () => archiveTasks([t]);
+    $("#mArchAll", el) && ($("#mArchAll", el).onclick = () => archiveTasks(future, t.series_id));
+    confirmTap($("#mDel", el), () => deleteTasks([t]));
+    $("#mDelAll", el) && confirmTap($("#mDelAll", el), () => deleteTasks(future, t.series_id));
+  });
+}
+async function stopSeries(seriesId) {
+  if (!seriesId) return;
+  await sb.from("task_series").update({ active: false }).eq("id", seriesId);
+  const s = state.series.find((x) => x.id === seriesId); if (s) s.active = false;
+}
+async function archiveTasks(list, stopSeriesId) {
+  const ids = list.map((x) => x.id);
+  const archived_at = new Date().toISOString();
+  const { error } = await sb.from("tasks").update({ archived: true, archived_at }).in("id", ids);
+  if (error) return toast(error.message);
+  await stopSeries(stopSeriesId);
+  const set = new Set(ids);
+  state.archived.unshift(...state.tasks.filter((x) => set.has(x.id)).map((x) => ({ ...x, archived: true, archived_at })));
+  state.tasks = state.tasks.filter((x) => !set.has(x.id));
+  closeSheet(); renderAll(); toast(ids.length > 1 ? `${ids.length} tasks archived` : "Task archived");
+}
+async function deleteTasks(list, stopSeriesId) {
+  const set = new Set(list.map((x) => x.id));
+  await deleteImages(state.images.filter((i) => set.has(i.task_id)));
+  const { error } = await sb.from("tasks").delete().in("id", [...set]);
+  if (error) return toast(error.message);
+  await stopSeries(stopSeriesId);
+  state.tasks = state.tasks.filter((x) => !set.has(x.id));
+  state.archived = state.archived.filter((x) => !set.has(x.id));
+  closeSheet(); renderAll(); toast(set.size > 1 ? `${set.size} tasks deleted` : "Task deleted");
+}
+function openArchivedSheet() {
+  const list = state.archived;
+  // group repeating tasks so a long series is one row
+  const groups = [];
+  const bySeries = new Map();
+  for (const x of list) {
+    if (x.series_id) {
+      if (!bySeries.has(x.series_id)) { const g = { key: x.series_id, items: [] }; bySeries.set(x.series_id, g); groups.push(g); }
+      bySeries.get(x.series_id).items.push(x);
+    } else groups.push({ key: x.id, items: [x] });
+  }
+  openSheet(`<h3 class="serif">Archived tasks</h3>
+    ${groups.length ? groups.map((g) => {
+      const x = g.items[0];
+      const when = g.items.length > 1 ? `${g.items.length} days · 🔁 ${esc(repeatText(x) || "repeating")}` : isRange(x) ? rangeText(x) : fmtDate(x.due_date);
+      return `<div class="hist-item"><div class="h-main"><div>${esc(x.title)}</div><div class="h-date">${when}</div></div>
+        ${state.isAdmin ? `<button type="button" class="btn small" data-restore="${g.key}">Restore</button>
+        <button type="button" class="x-btn" data-purge="${g.key}" aria-label="Delete for good">🗑️</button>` : ""}</div>`;
+    }).join("") : `<div class="empty">Nothing archived.</div>`}
+    <button type="button" class="btn ghost block" data-close>Close</button>`, (el) => {
+    const itemsOf = (key) => (bySeries.get(key) || groups.find((g) => g.key === key)).items;
+    el.addEventListener("click", async (e) => {
+      const r = e.target.closest("[data-restore]"), p = e.target.closest("[data-purge]");
+      if (r) {
+        const items = itemsOf(r.dataset.restore), ids = items.map((x) => x.id);
+        const { error } = await sb.from("tasks").update({ archived: false, archived_at: null }).in("id", ids);
+        if (error) return toast(error.message);
+        const set = new Set(ids);
+        state.tasks.push(...items.map((x) => ({ ...x, archived: false, archived_at: null })));
+        state.tasks.sort((a, b) => a.due_date.localeCompare(b.due_date));
+        state.archived = state.archived.filter((x) => !set.has(x.id));
+        renderAll(); openArchivedSheet(); toast("Restored");
+      } else if (p) {
+        if (!p.dataset.armed) { p.dataset.armed = "1"; p.textContent = "Sure?"; p.style.width = "auto"; return; }
+        await deleteTasks(itemsOf(p.dataset.purge));
+        openArchivedSheet();
+      }
     });
   });
 }
@@ -1006,8 +1131,9 @@ async function openSettings() {
     <div class="setting"><div><b>Phone notifications</b><small>${subscribed ? "On for this device" : "Off for this device"}</small></div>
       ${subscribed ? `<button type="button" class="btn small" id="sOff">Turn off</button>` : `<button type="button" class="btn small primary" id="sOn">Turn on</button>`}</div>
     ${iosHelp}
+    <div class="setting"><div><b>Archived tasks</b><small>${state.archived.length ? `${state.archived.length} archived` : "None"}</small></div><button type="button" class="btn small" id="sArch">View</button></div>
     <div class="setting"><div><b>Photo storage</b><small>${fmtMB(usedBytes())} of 100 MB used</small></div></div>
-    <div class="setting"><div><b>Reminder schedule</b><small>Hourly for unchecked tasks · Weekdays 9pm–12am · Weekends 12pm–12am (Singapore time). Threshold alerts are sent straight away.</small></div></div>
+    <div class="setting"><div><b>Reminder schedule</b><small><b>One due date:</b> hourly while unchecked — weekdays 9pm–12am, weekends 12pm–12am.<br><b>Time range:</b> 12pm every day in the range, then hourly 7pm–11pm on the due day.<br>Singapore time. Threshold alerts are sent straight away.</small></div></div>
     ${subscribed ? `<div class="setting"><div><b>Send a reminder now</b><small>Test what the hourly reminder looks like</small></div><button type="button" class="btn small" id="sTest">Send</button></div>` : ""}
     <div class="setting"><div><b>How penalties work</b><small>A task still unchecked after midnight on its date adds its penalty points automatically. You can also add points by hand.</small></div></div>
     ${state.isAdmin
@@ -1016,6 +1142,7 @@ async function openSettings() {
     <button type="button" class="btn ghost block" data-close>Close</button>`, (el) => {
     $("#sOn", el) && ($("#sOn", el).onclick = enablePush);
     $("#sIn", el) && ($("#sIn", el).onclick = openAdminLogin);
+    $("#sArch", el).onclick = openArchivedSheet;
     $("#sOut", el) && ($("#sOut", el).onclick = async () => { await sb.auth.signOut(); await checkAdmin(); closeSheet(); renderAll(); toast("Signed out — view only"); });
     $("#sOff", el) && ($("#sOff", el).onclick = disablePush);
     $("#sTest", el) && ($("#sTest", el).onclick = async () => {

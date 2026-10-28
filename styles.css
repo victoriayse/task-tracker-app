@@ -196,3 +196,5 @@ input[readonly]{background:transparent;border-color:transparent;padding-left:4px
 .detail dt{color:var(--muted);font-weight:600}
 .detail dd{margin:0}
 .detail-text{white-space:pre-wrap;margin:4px 0 8px;font-size:15px}
+
+.chip.span{opacity:.6;font-weight:500}

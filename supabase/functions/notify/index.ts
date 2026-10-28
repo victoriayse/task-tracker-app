@@ -57,26 +57,41 @@ async function sendToUser(userId: string, payload: Record<string, unknown>) {
   return sent;
 }
 
-async function remindUser(userId: string, refDate: string, lastCall: boolean) {
-  const { data: tasks } = await admin
+// Which unchecked tasks to mention this hour.
+//  • One-date tasks (and anything overdue): weekdays 9pm–12am, weekends 12pm–12am  (inWindow)
+//  • Time-range tasks: 12pm every day inside the range, then hourly 7pm–11pm on the due (last) day
+async function remindUser(userId: string, refDate: string, lastCall: boolean, inWindow: boolean, hour: number, today: string, force = false) {
+  const { data: all } = await admin
     .from("tasks")
-    .select("title,due_date,penalty_points")
+    .select("title,due_date,start_date,penalty_points")
     .eq("user_id", userId)
     .eq("completed", false)
-    .lte("due_date", refDate)
+    .eq("archived", false)
+    .lte("due_date", addDays(today, 400))
     .order("due_date");
-  if (!tasks || tasks.length === 0) return 0;
-  const pts = tasks.reduce((a, t) => a + (t.penalty_points || 0), 0);
-  const names = tasks.slice(0, 4).map((t) => "• " + t.title).join("\n");
-  const more = tasks.length > 4 ? `\n+${tasks.length - 4} more` : "";
+  const isRange = (t: { start_date: string | null; due_date: string }) => !!t.start_date && t.start_date < t.due_date;
+  const pick = (all || []).filter((t) => {
+    if (force) return t.due_date <= today || (isRange(t) && t.start_date! <= today);
+    if (!isRange(t)) return inWindow && t.due_date <= refDate;
+    if (t.due_date < refDate) return inWindow;                               // overdue range task
+    if (t.due_date === today && hour >= 19 && hour <= 23) return true;       // due day: hourly 7pm–11pm
+    if (hour === 12 && t.start_date! <= today && today < t.due_date) return true; // daily 12pm during range
+    return false;
+  });
+  if (!pick.length) return 0;
+  const dueToday = pick.filter((t) => t.due_date <= refDate);
+  const pts = dueToday.reduce((a, t) => a + (t.penalty_points || 0), 0);
+  const label = (t: { title: string; due_date: string; start_date: string | null }) =>
+    "• " + t.title + (isRange(t) && t.due_date > today ? ` (due ${t.due_date.slice(8)}/${t.due_date.slice(5, 7)})` : "");
+  const names = pick.slice(0, 4).map(label).join("\n");
+  const more = pick.length > 4 ? `\n+${pick.length - 4} more` : "";
   return sendToUser(userId, {
-    title: lastCall ? `⏰ Last call: ${tasks.length} unchecked task${tasks.length > 1 ? "s" : ""}` : `📝 ${tasks.length} task${tasks.length > 1 ? "s" : ""} still unchecked`,
-    body: `${names}${more}\n${pts} penalty pts at stake`,
+    title: lastCall ? `⏰ Last call: ${pick.length} unchecked task${pick.length > 1 ? "s" : ""}` : `📝 ${pick.length} task${pick.length > 1 ? "s" : ""} still unchecked`,
+    body: `${names}${more}${pts ? `\n${pts} penalty pts at stake tonight` : ""}`,
     tag: "reminder",
     url: "./",
   });
 }
-
 async function checkThreshold(userId: string) {
   const [{ data: entries }, { data: ths }, { data: st }] = await Promise.all([
     admin.from("penalty_entries").select("points").eq("user_id", userId).eq("cleared", false),
@@ -123,9 +138,7 @@ Deno.serve(async (req) => {
 
       const { data: users } = await admin.from("user_settings").select("user_id");
       let reminders = 0;
-      if (inWindow || body.force) {
-        for (const u of users || []) reminders += await remindUser(u.user_id, refDate, lastCall);
-      }
+      for (const u of users || []) reminders += await remindUser(u.user_id, refDate, lastCall, inWindow, now.hour, now.date, !!body.force);
       // After midnight: charge points for tasks whose day has passed unchecked
       let charged = 0;
       if (lastCall || body.force) {
@@ -160,7 +173,8 @@ Deno.serve(async (req) => {
       return json({ ok: true, sent });
     }
     if (body.mode === "remind") {
-      const sent = await remindUser(user.id, sgNow().date, false);
+      const n = sgNow();
+      const sent = await remindUser(user.id, n.date, false, true, n.hour, n.date, true);
       return json({ ok: true, sent });
     }
     const r = await checkThreshold(user.id);
