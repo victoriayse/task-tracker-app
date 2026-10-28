@@ -214,3 +214,11 @@ input[readonly]{background:transparent;border-color:transparent;padding-left:4px
 .mini-btn:active{transform:scale(.95)}
 
 .text-link{color:var(--accent);text-decoration:underline;word-break:break-all}
+
+/* Admin view/edit toggle */
+.edit-toggle{display:none;white-space:nowrap;align-self:center;height:32px;padding:0 12px;border-radius:999px;border:1.5px solid var(--line);background:var(--card);font-size:13px;font-weight:700;color:var(--muted)}
+body.admin-authed .edit-toggle{display:inline-flex;align-items:center}
+.edit-toggle.on{background:var(--accent);border-color:var(--accent);color:#fff}
+.mode-label.editing{background:var(--accent);color:#fff}
+.check-line{display:flex;align-items:center;gap:8px;font-size:15px;font-weight:500}
+.check-line input{width:20px;height:20px;accent-color:var(--accent)}

@@ -5,7 +5,7 @@ const VAPID_PUBLIC = "BJd0pVUgBPkI3t2OEexmrDiuDdxLtn6BavlNkpm8lBhuepe3vP9u4LUCXb
 
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 const OWNER = "00000000-0000-0000-0000-000000000001"; // one shared, public tracker
-const APP_VERSION = "10"; // bump together with version.json on every release
+const APP_VERSION = "11"; // bump together with version.json on every release
 const $ = (s, el = document) => el.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
@@ -29,8 +29,10 @@ const state = {
   thresholds: [],
   layout: DEFAULT_LAYOUT.slice(),
   collapsed: {},
-  chartTab: "catalogue",
-  isAdmin: false,
+  chartTab: "threshold",
+  isAdmin: false,      // true only while the admin is in edit mode
+  adminAuthed: false,  // signed in as admin
+  editMode: false,
   adminEmail: "",
   calMonth: null, // "YYYY-MM"
   calSel: null,
@@ -143,7 +145,7 @@ async function boot() {
   await checkAdmin();
   $("#app").classList.remove("hidden");
   state.collapsed = lsGet("tt_collapsed", {});
-  state.chartTab = lsGet("tt_chartTab", "catalogue");
+  state.chartTab = lsGet("tt_chartTab2", "threshold");
   state.bannerHiddenFor = lsGet("tt_bannerHidden", null);
   state.calMonth = sgDateStr().slice(0, 7);
   state.calSel = sgDateStr();
@@ -221,6 +223,7 @@ function taskRow(t, showDate) {
     meta.push(`<span>📅 ${rangeText(t)}${r && !t.completed ? ` · day ${r.day} of ${r.of}` : ""}</span>`);
   } else if (showDate) meta.push(`<span class="${late ? "late" : ""}">${late ? "Overdue · " : ""}${relDay(t.due_date)}</span>`);
   if (t.due_time) meta.push(`<span>🕒 ${fmtTime(t.due_time)}</span>`);
+  if (t.remind_from && !t.completed) meta.push(`<span>🔔 hourly</span>`);
   const rt = repeatText(t);
   if (rt) meta.push(`<span>🔁 ${esc(rt)}</span>`);
   if (t.penalized) meta.push(`<span class="late">Penalty charged</span>`);
@@ -370,7 +373,7 @@ function renderTotal() {
 
 function renderChart() {
   const tab = state.chartTab;
-  const tabs = `<div class="tabs"><button type="button" data-tab="catalogue" class="${tab === "catalogue" ? "on" : ""}">Catalogue</button><button type="button" data-tab="threshold" class="${tab === "threshold" ? "on" : ""}">Threshold</button></div>`;
+  const tabs = `<div class="tabs"><button type="button" data-tab="threshold" class="${tab === "threshold" ? "on" : ""}">Threshold</button><button type="button" data-tab="catalogue" class="${tab === "catalogue" ? "on" : ""}">Catalogue</button></div>`;
   if (tab === "catalogue") {
     return tabs + `<div class="chart-head"><span>Item</span><span style="text-align:center">Points</span><span></span></div>
       ${state.catalogue.map((c) => `<div class="chart-row" data-cat="${c.id}">
@@ -424,7 +427,7 @@ $("#sections").addEventListener("click", async (e) => {
     lsSet("tt_collapsed", state.collapsed); renderAll(); return;
   }
   const WRITE = d.edittask || d.deltask || d.check || d.edit || d.addon || d.delcat || d.delth || d.delentry || d.move || ["addCat", "addTh", "addPenalty", "served"].includes(d.act);
-  if (WRITE && !state.isAdmin) return toast("View only — admin sign-in needed to make changes");
+  if (WRITE && !state.isAdmin) return toast(state.adminAuthed ? "Tap ✎ Edit at the top to make changes" : "View only — admin sign-in needed to make changes");
   if (d.check) return toggleTask(d.check);
   if (d.edittask) return openTaskSheet(state.tasks.find((x) => x.id === d.edittask));
   if (d.deltask) return confirmDelete(state.tasks.find((x) => x.id === d.deltask));
@@ -438,7 +441,7 @@ $("#sections").addEventListener("click", async (e) => {
     renderAll(); return;
   }
   if (d.addon) return openTaskSheet(null, d.addon);
-  if (d.tab) { state.chartTab = d.tab; lsSet("tt_chartTab", d.tab); renderAll(); return; }
+  if (d.tab) { state.chartTab = d.tab; lsSet("tt_chartTab2", d.tab); renderAll(); return; }
   if (d.delcat) return deleteRow("catalogue_items", "catalogue", d.delcat);
   if (d.delth) return deleteRow("thresholds", "thresholds", d.delth);
   if (d.delentry) return deleteEntry(d.delentry);
@@ -485,6 +488,11 @@ $("#btnArrange").onclick = () => { state.arranging = !state.arranging; $("#arran
 $("#btnArrangeDone").onclick = () => { state.arranging = false; $("#arrangeBar").classList.add("hidden"); renderAll(); toast("Layout saved"); };
 
 /* ---------- Tasks ---------- */
+// ISO timestamp -> "YYYY-MM-DDTHH:MM" in Singapore time for <input type="datetime-local">
+function toLocalInput(iso) {
+  if (!iso) return "";
+  return new Date(new Date(iso).getTime() + 8 * 3600e3).toISOString().slice(0, 16);
+}
 function isRange(t) { return !!t.start_date && t.start_date < t.due_date; }
 // is the task "on" for a given day? (its due day, or any day inside its from–to range)
 function activeOn(t, d) { return isRange(t) ? t.start_date <= d && d <= t.due_date : t.due_date === d; }
@@ -637,6 +645,7 @@ function openTaskDetails(id) {
       ? ["Time range", `${fmtDate(t.start_date, { weekday: "short", day: "numeric", month: "short" })} → ${fmtDate(t.due_date, { weekday: "short", day: "numeric", month: "short" })} <span class="muted">(due on the last day)</span>`]
       : ["Due date", fmtDate(t.due_date, { weekday: "long", day: "numeric", month: "long", year: "numeric" })],
     t.due_time ? ["Time", fmtTime(t.due_time)] : null,
+    t.remind_from && !t.completed ? ["Hourly reminders", `from ${new Date(t.remind_from).toLocaleString("en-SG", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit", timeZone: "Asia/Singapore" })} until due`] : null,
     ["Penalty if missed", `${t.penalty_points} pts`],
     repeatText(t) ? ["Repeats", esc(repeatText(t))] : null,
   ].filter(Boolean);
@@ -739,6 +748,13 @@ function openTaskSheet(task, presetDate) {
       <label class="field"><span id="fDateLbl">${mode === "range" ? "To (due day)" : "Due date"}</span><input id="fDate" type="date" value="${t.due_date}"></label>
     </div>
     <label class="field"><span>Time (optional)</span><input id="fTime" type="time" value="${t.due_time ? t.due_time.slice(0, 5) : ""}"></label>
+    <div class="field ${mode === "range" ? "hidden" : ""}" id="fRemWrap"><span>Extra hourly reminders (optional)</span>
+      <label class="check-line"><input type="checkbox" id="fRemOn" ${t.remind_from ? "checked" : ""}> Remind me every hour from…</label>
+      <div class="row ${t.remind_from ? "" : "hidden"}" id="fRemRow" style="margin-top:6px">
+        <input id="fRemFrom" type="datetime-local" value="${toLocalInput(t.remind_from)}">
+        <button type="button" class="btn small" id="fRemNow" style="flex:0 0 auto">Now</button>
+      </div>
+      <div class="muted" style="font-size:12.5px;margin-top:4px">…until the due date and time above (e.g. from now till 1am → one reminder at 12am).</div></div>
     <div class="muted ${mode === "range" ? "" : "hidden"}" id="fRangeHint" style="font-size:12.5px;margin-top:6px">Reminder at 12pm every day in the range, then hourly 7pm–11pm on the due day. Tick it off any day in the range.</div>
     <label class="field"><span>Penalty points if missed</span><input id="fPts" type="number" inputmode="numeric" min="0" value="${t.penalty_points}"></label>
     ${isEdit ? (t.series_id ? `<div class="note">🔁 Repeats: ${esc(repeatText(t))}. Changes here apply to this day only.</div>` : "") : `<div class="field ${mode === "range" ? "hidden" : ""}" id="fRepeatWrap"><span>Repeat</span><div class="seg" id="fRepeat">
@@ -776,6 +792,7 @@ function openTaskSheet(task, presetDate) {
       $("#fStartWrap", el).classList.toggle("hidden", mode !== "range");
       $("#fRangeHint", el).classList.toggle("hidden", mode !== "range");
       $("#fRepeatWrap", el)?.classList.toggle("hidden", mode === "range");
+      $("#fRemWrap", el).classList.toggle("hidden", mode === "range");
       $("#fDateLbl", el).textContent = mode === "range" ? "To (due day)" : "Due date";
       if (mode === "range") {
         repeat = "none";
@@ -799,6 +816,11 @@ function openTaskSheet(task, presetDate) {
       const c = state.catalogue.find((x) => x.id === b.dataset.pick);
       $("#fTitle", el).value = c.item; $("#fPts", el).value = c.points;
     });
+    $("#fRemOn", el).addEventListener("change", (e) => {
+      $("#fRemRow", el).classList.toggle("hidden", !e.target.checked);
+      if (e.target.checked && !$("#fRemFrom", el).value) $("#fRemFrom", el).value = toLocalInput(new Date().toISOString());
+    });
+    $("#fRemNow", el).onclick = () => ($("#fRemFrom", el).value = toLocalInput(new Date().toISOString()));
     let newFiles = [];
     bindPhotoPicker(el, "fPhotos", (f) => (newFiles = f));
     $("#fCurImgs", el)?.addEventListener("click", async (e) => {
@@ -817,8 +839,11 @@ function openTaskSheet(task, presetDate) {
         start_date = $("#fStart", el).value || sgDateStr();
         if (start_date >= dueVal) return toast("The 'To' date must be after the 'From' date");
       }
+      const remOn = mode !== "range" && $("#fRemOn", el).checked && $("#fRemFrom", el).value;
+      const remind_from = remOn ? new Date($("#fRemFrom", el).value + ":00+08:00").toISOString() : null;
       const base = {
         title,
+        remind_from,
         ...(t.series_id ? {} : { start_date }),
         due_date: dueVal,
         due_time: $("#fTime", el).value || null,
@@ -1073,15 +1098,28 @@ document.addEventListener("visibilitychange", () => { if (document.visibilitySta
 function RO() { return state.isAdmin ? "" : "readonly"; }
 async function checkAdmin() {
   const { data: { session } } = await sb.auth.getSession();
-  state.isAdmin = false; state.adminEmail = "";
+  state.adminAuthed = false; state.adminEmail = "";
   if (session?.user) {
     const { data } = await sb.rpc("is_admin");
-    state.isAdmin = !!data;
+    state.adminAuthed = !!data;
     state.adminEmail = session.user.email || "";
   }
-  document.body.classList.toggle("is-admin", state.isAdmin);
-  $("#modeLabel").textContent = state.isAdmin ? "" : "View only";
+  if (!state.adminAuthed) state.editMode = false;
+  applyMode();
 }
+// Admin sees the visitor view by default; the small ✎ Edit button switches to editing
+function applyMode() {
+  state.isAdmin = state.adminAuthed && state.editMode;
+  if (!state.isAdmin && state.arranging) { state.arranging = false; $("#arrangeBar").classList.add("hidden"); }
+  document.body.classList.toggle("is-admin", state.isAdmin);
+  document.body.classList.toggle("admin-authed", state.adminAuthed);
+  $("#modeLabel").textContent = state.adminAuthed ? (state.editMode ? "Editing" : "") : "View only";
+  $("#modeLabel").classList.toggle("editing", state.isAdmin);
+  const b = $("#btnEdit");
+  b.textContent = state.editMode ? "✓ Done" : "✎ Edit";
+  b.classList.toggle("on", state.editMode);
+}
+$("#btnEdit").onclick = () => { state.editMode = !state.editMode; applyMode(); renderAll(); toast(state.editMode ? "Edit mode on" : "Back to view mode"); };
 function openAdminLogin() {
   openSheet(`<h3 class="serif">Admin sign in</h3>
     <p class="muted" style="margin:0;font-size:14px">Only the admin can add, tick or change things.</p>
@@ -1096,8 +1134,9 @@ function openAdminLogin() {
       const { error } = await sb.auth.signInWithPassword({ email: $("#aEmail", el).value.trim(), password: $("#aPass", el).value });
       if (error) return msg(error.message);
       await checkAdmin();
-      if (!state.isAdmin) { await sb.auth.signOut(); await checkAdmin(); return msg("This account isn't the admin."); }
-      closeSheet(); renderAll(); toast("Admin mode on");
+      if (!state.adminAuthed) { await sb.auth.signOut(); await checkAdmin(); return msg("This account isn't the admin."); }
+      state.editMode = true; applyMode();
+      closeSheet(); renderAll(); toast("Signed in — edit mode on. Tap ✓ Done to see the visitor view.");
     };
     $("#aForgot", el).onclick = async () => {
       const email = $("#aEmail", el).value.trim();
@@ -1194,9 +1233,9 @@ async function openSettings() {
     <div class="setting"><div><b>Photo storage</b><small>${fmtMB(usedBytes())} of 100 MB used</small></div></div>
     <div class="setting"><div><b>Reminder schedule</b><small><b>One due date:</b> hourly while unchecked — weekdays 9pm–12am, weekends 12pm–12am.<br><b>Time range:</b> 12pm every day in the range, then hourly 7pm–11pm on the due day.<br>Singapore time. Threshold alerts are sent straight away.</small></div></div>
     ${subscribed ? `<div class="setting"><div><b>Send a reminder now</b><small>Test what the hourly reminder looks like</small></div><button type="button" class="btn small" id="sTest">Send</button></div>` : ""}
-    <div class="setting"><div><b>How penalties work</b><small>A task still unchecked after midnight on its date adds its penalty points automatically. You can also add points by hand.</small></div></div>
-    ${state.isAdmin
-      ? `<div class="setting"><div><b>Admin mode</b><small>Signed in as ${esc(state.adminEmail)} — you can make changes</small></div><button type="button" class="btn small" id="sOut">Sign out</button></div>`
+    <div class="setting"><div><b>How penalties work</b><small>A task still unchecked when it's due adds its penalty points automatically — right after its due time if it has one, otherwise after midnight. You get a phone notification whenever points are added.</small></div></div>
+    ${state.adminAuthed
+      ? `<div class="setting"><div><b>Admin</b><small>Signed in as ${esc(state.adminEmail)}. Use the ✎ Edit button at the top to make changes.</small></div><button type="button" class="btn small" id="sOut">Sign out</button></div>`
       : `<div class="setting"><div><b>View only</b><small>Anyone with the link can view. Only the admin can make changes.</small></div><button type="button" class="btn small primary" id="sIn">Admin sign in</button></div>`}
     <button type="button" class="btn ghost block" data-close>Close</button>`, (el) => {
     $("#sOn", el) && ($("#sOn", el).onclick = enablePush);
