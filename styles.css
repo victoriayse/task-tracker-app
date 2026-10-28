@@ -222,3 +222,5 @@ body.admin-authed .edit-toggle{display:inline-flex;align-items:center}
 .mode-label.editing{background:var(--accent);color:#fff}
 .check-line{display:flex;align-items:center;gap:8px;font-size:15px;font-weight:500}
 .check-line input{width:20px;height:20px;accent-color:var(--accent)}
+
+.check:disabled{opacity:.45}

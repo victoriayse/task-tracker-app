@@ -5,7 +5,7 @@ const VAPID_PUBLIC = "BJd0pVUgBPkI3t2OEexmrDiuDdxLtn6BavlNkpm8lBhuepe3vP9u4LUCXb
 
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 const OWNER = "00000000-0000-0000-0000-000000000001"; // one shared, public tracker
-const APP_VERSION = "12"; // bump together with version.json on every release
+const APP_VERSION = "13"; // bump together with version.json on every release
 const $ = (s, el = document) => el.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
@@ -232,7 +232,7 @@ function taskRow(t, showDate) {
   const nImg = imagesFor(t.id).length;
   if (nImg) meta.push(`<span>📷 ${nImg}</span>`);
   const checkable = canCheck(t);
-  const box = checkable || !state.isAdmin
+  const box = checkable || !(isRepeat(t) && t.due_date > sgDateStr())
     ? `<button type="button" class="check${t.completed ? " on" : ""}" data-check="${t.id}" ${checkable ? "" : "disabled"} aria-label="${t.completed ? "Mark not done" : "Mark done"}">${t.completed ? "✓" : ""}</button>`
     : `<span class="check locked${t.completed ? " on" : ""}" title="Repeating tasks can't be ticked before their day">${t.completed ? "✓" : "🔁"}</span>`;
   return `<div class="task${t.completed ? " done" : ""}" data-task="${t.id}">
@@ -426,7 +426,7 @@ $("#sections").addEventListener("click", async (e) => {
     state.collapsed[sec] = !state.collapsed[sec];
     lsSet("tt_collapsed", state.collapsed); renderAll(); return;
   }
-  const WRITE = d.edittask || d.deltask || d.check || d.edit || d.addon || d.delcat || d.delth || d.delentry || d.move || ["addCat", "addTh", "addPenalty", "served"].includes(d.act);
+  const WRITE = d.edittask || d.deltask || d.edit || d.addon || d.delcat || d.delth || d.delentry || d.move || ["addCat", "addTh", "addPenalty", "served"].includes(d.act);
   if (WRITE && !state.isAdmin) return toast(state.adminAuthed ? "Tap ✎ Edit at the top to make changes" : "View only — admin sign-in needed to make changes");
   if (d.check) return toggleTask(d.check);
   if (d.edittask) return openTaskSheet(state.tasks.find((x) => x.id === d.edittask));
@@ -503,16 +503,27 @@ function rangeDay(t, d) {
 }
 function isRepeat(t) { return !!t.series_id || (t.repeat && t.repeat !== "none"); }
 // Repeating tasks can be ticked on their day or afterwards (admin override for overdue) — not ahead of time
-function canCheck(t) { return state.isAdmin && (!isRepeat(t) || t.due_date <= sgDateStr()); }
+function isOverdue(t) {
+  if (t.due_time) return Date.now() >= Date.parse(`${t.due_date}T${t.due_time.slice(0, 8)}+08:00`);
+  return t.due_date < sgDateStr();
+}
+// Everyone can tick open tasks; only the admin (in edit mode) can tick overdue ones
+function canCheck(t) {
+  if (t.archived) return false;
+  if (isRepeat(t) && t.due_date > sgDateStr()) return false; // not before its day
+  return state.isAdmin || !isOverdue(t);
+}
 
 async function toggleTask(id) {
   const t = state.tasks.find((x) => x.id === id);
   if (!t) return;
-  if (!canCheck(t)) return toast("Repeating tasks can't be ticked before their day");
+  if (!canCheck(t)) return toast(isOverdue(t) ? (state.adminAuthed ? "Overdue — tap ✎ Edit at the top to tick it off" : "Overdue — only the admin can tick this off") : "Repeating tasks can't be ticked before their day");
   if (!t.completed) return openCompleteSheet(t);
   // un-tick (keeps any photos/notes already saved)
   t.completed = false; t.completed_at = null; renderAll();
-  const { error } = await sb.from("tasks").update({ completed: false, completed_at: null }).eq("id", id);
+  const { error } = state.isAdmin
+    ? await sb.from("tasks").update({ completed: false, completed_at: null }).eq("id", id)
+    : await sb.rpc("set_task_done", { p_task: id, p_done: false });
   if (error) { t.completed = true; renderAll(); toast(error.message); }
 }
 
@@ -523,7 +534,7 @@ function openCompleteSheet(t) {
   const overdue = t.due_date < sgDateStr();
   openSheet(`<h3 class="serif">Mark as done</h3>
     <p class="muted" style="margin:0 0 4px">${esc(t.title)} · ${relDay(t.due_date)}${overdue ? ` <span class="status bad">Overdue</span>` : ""}</p>
-    ${chargedPts ? `<div class="note"><label class="check-line"><input type="checkbox" id="cRefund" checked> Also remove the ${chargedPts} penalty point${chargedPts === 1 ? "" : "s"} charged for missing it</label></div>` : overdue ? `<div class="note">Admin override: this marks an overdue task as done.</div>` : ""}
+    ${chargedPts && state.isAdmin ? `<div class="note"><label class="check-line"><input type="checkbox" id="cRefund" checked> Also remove the ${chargedPts} penalty point${chargedPts === 1 ? "" : "s"} charged for missing it</label></div>` : overdue ? `<div class="note">Admin override: this marks an overdue task as done.</div>` : ""}
     <label class="field"><span>Notes (optional)</span><textarea id="cNote" placeholder="How did it go?">${esc(t.completion_note || "")}</textarea></label>
     ${photoPickerHtml("cPhotos")}
     <button type="button" class="btn primary block" id="cSave">✓ Mark done</button>
@@ -533,7 +544,9 @@ function openCompleteSheet(t) {
       const btn = $("#cSave", el); btn.disabled = true; btn.textContent = files.length ? "Uploading photos…" : "Saving…";
       const completion_note = $("#cNote", el).value.trim() || null;
       const completed_at = new Date().toISOString();
-      const { error } = await sb.from("tasks").update({ completed: true, completed_at, completion_note }).eq("id", t.id);
+      const { error } = state.isAdmin
+        ? await sb.from("tasks").update({ completed: true, completed_at, completion_note }).eq("id", t.id)
+        : await sb.rpc("set_task_done", { p_task: t.id, p_done: true, p_note: completion_note });
       if (error) { btn.disabled = false; btn.textContent = "✓ Mark done"; return toast(error.message); }
       Object.assign(t, { completed: true, completed_at, completion_note });
       let refunded = 0;
@@ -618,7 +631,9 @@ async function uploadImages(taskId, files, kind) {
     const path = `${taskId}/${kind}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
     const up = await sb.storage.from("task-images").upload(path, f, { contentType: f.type || "image/jpeg" });
     if (up.error) { ok = false; console.warn(up.error); continue; }
-    const { data, error } = await sb.from("task_images").insert({ task_id: taskId, path, size: f.size, kind }).select().single();
+    const { data, error } = state.isAdmin
+      ? await sb.from("task_images").insert({ task_id: taskId, path, size: f.size, kind }).select().single()
+      : await sb.rpc("add_completion_image", { p_task: taskId, p_path: path, p_size: f.size });
     if (error) { ok = false; toast(error.message); await sb.storage.from("task-images").remove([path]); continue; }
     state.images.push(data);
   }
@@ -671,11 +686,11 @@ function openTaskDetails(id) {
     ${t.completed ? `<div class="sub-h" style="color:var(--ok)">Completed ${completedAt}</div>
       ${t.completion_note ? `<p class="detail-text">${linkify(t.completion_note)}</p>` : ""}
       ${galleryHtml(doneImgs)}` : ""}
-    ${state.isAdmin ? `<div class="btn-row">
+    ${checkable || state.isAdmin ? `<div class="btn-row">
       ${checkable ? `<button type="button" class="btn ${t.completed ? "" : "primary"}" id="dCheck">${t.completed ? "Mark not done" : "✓ Mark done"}</button>` : ""}
-      <button type="button" class="btn" id="dEdit">Edit</button></div>
-      <button type="button" class="link" id="dManage" style="color:var(--danger)">Archive or delete…</button>
-      ${!checkable && isRepeat(t) && !t.completed ? `<p class="muted" style="font-size:12.5px">Repeating tasks can't be ticked before their day.</p>` : ""}` : ""}
+      ${state.isAdmin ? `<button type="button" class="btn" id="dEdit">Edit</button>` : ""}</div>` : ""}
+    ${state.isAdmin ? `<button type="button" class="link" id="dManage" style="color:var(--danger)">Archive or delete…</button>` : ""}
+    ${!checkable && !t.completed ? `<p class="muted" style="font-size:12.5px">${isOverdue(t) ? "Overdue — only the admin can tick this off." : "Repeating tasks can't be ticked before their day."}</p>` : ""}
     <button type="button" class="btn ghost block" data-close>Close</button>`, (el) => {
     $("#dCheck", el) && ($("#dCheck", el).onclick = () => { closeSheet(); toggleTask(t.id); });
     $("#dEdit", el) && ($("#dEdit", el).onclick = () => openTaskSheet(t));
