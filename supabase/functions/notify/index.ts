@@ -31,6 +31,9 @@ function sgNow() {
   const d = new Date(Date.now() + 8 * 3600 * 1000); // shift, then read UTC fields
   return { hour: d.getUTCHours(), dow: d.getUTCDay(), date: d.toISOString().slice(0, 10) };
 }
+// Quiet time 2am–7am (Singapore): nothing is sent; penalty/threshold alerts wait until 7am
+const QUIET_FROM = 2, QUIET_TO = 7;
+function isQuiet(hour = sgNow().hour) { return hour >= QUIET_FROM && hour < QUIET_TO; }
 function addDays(iso: string, n: number) {
   const d = new Date(iso + "T00:00:00Z");
   d.setUTCDate(d.getUTCDate() + n);
@@ -162,13 +165,15 @@ Deno.serve(async (req) => {
       const inWindow = lastCall || (weekend ? now.hour >= 12 : now.hour >= 21);
 
       const { data: users } = await admin.from("user_settings").select("user_id");
+      const quiet = isQuiet(now.hour);
       let reminders = 0;
-      for (const u of users || []) reminders += await remindUser(u.user_id, refDate, lastCall, inWindow, now.hour, now.date, !!body.force);
-      // Charge points for missed tasks (untimed: after midnight; timed: once the due time passes)
+      if (!quiet) for (const u of users || []) reminders += await remindUser(u.user_id, refDate, lastCall, inWindow, now.hour, now.date, !!body.force);
+      // Charge points for missed tasks (untimed: after midnight; timed: once the due time passes) — even in quiet time
       const { data: chargedN } = await admin.rpc("apply_missed_penalties", { p_user: null });
       const charged = chargedN || 0;
-      for (const u of users || []) { await notifyPenalties(u.user_id); await checkThreshold(u.user_id); }
-      return json({ ok: true, sg: now, inWindow, reminders, charged });
+      // alerts for points / thresholds are held during quiet time and go out at 7am
+      if (!quiet) for (const u of users || []) { await notifyPenalties(u.user_id); await checkThreshold(u.user_id); }
+      return json({ ok: true, sg: now, quiet, inWindow, reminders, charged });
     }
 
     // ---- Called from the app (public, shared tracker — no login) ----
@@ -199,6 +204,7 @@ Deno.serve(async (req) => {
       const sent = await remindUser(user.id, n.date, false, true, n.hour, n.date, true);
       return json({ ok: true, sent });
     }
+    if (isQuiet()) return json({ ok: true, quiet: true }); // held until 7am
     await notifyPenalties(user.id);
     const r = await checkThreshold(user.id);
     return json({ ok: true, ...r });

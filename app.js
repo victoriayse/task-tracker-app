@@ -5,7 +5,7 @@ const VAPID_PUBLIC = "BJd0pVUgBPkI3t2OEexmrDiuDdxLtn6BavlNkpm8lBhuepe3vP9u4LUCXb
 
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 const OWNER = "00000000-0000-0000-0000-000000000001"; // one shared, public tracker
-const APP_VERSION = "13"; // bump together with version.json on every release
+const APP_VERSION = "14"; // bump together with version.json on every release
 const $ = (s, el = document) => el.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
@@ -1257,7 +1257,7 @@ async function openSettings() {
     ${iosHelp}
     <div class="setting"><div><b>Archived tasks</b><small>${state.archived.length ? `${state.archived.length} archived` : "None"}</small></div><button type="button" class="btn small" id="sArch">View</button></div>
     <div class="setting"><div><b>Photo storage</b><small>${fmtMB(usedBytes())} of 100 MB used</small></div></div>
-    <div class="setting"><div><b>Reminder schedule</b><small><b>One due date:</b> hourly while unchecked — weekdays 9pm–12am, weekends 12pm–12am.<br><b>Time range:</b> 12pm every day in the range, then hourly 7pm–11pm on the due day.<br>Singapore time. Threshold alerts are sent straight away.</small></div></div>
+    <div class="setting"><div><b>Reminder schedule</b><small><b>One due date:</b> hourly while unchecked — weekdays 9pm–12am, weekends 12pm–12am.<br><b>Time range:</b> 12pm every day in the range, then hourly 7pm–11pm on the due day.<br><b>Quiet time 2am–7am:</b> no notifications. Penalty and threshold alerts from that time arrive at 7am.<br>Singapore time. Threshold alerts are otherwise sent straight away.</small></div></div>
     ${subscribed ? `<div class="setting"><div><b>Send a reminder now</b><small>Test what the hourly reminder looks like</small></div><button type="button" class="btn small" id="sTest">Send</button></div>` : ""}
     <div class="setting"><div><b>How penalties work</b><small>A task still unchecked when it's due adds its penalty points automatically — right after its due time if it has one, otherwise after midnight. You get a phone notification whenever points are added.</small></div></div>
     ${state.adminAuthed
