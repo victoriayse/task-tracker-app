@@ -5,7 +5,7 @@ const VAPID_PUBLIC = "BJd0pVUgBPkI3t2OEexmrDiuDdxLtn6BavlNkpm8lBhuepe3vP9u4LUCXb
 
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 const OWNER = "00000000-0000-0000-0000-000000000001"; // one shared, public tracker
-const APP_VERSION = "15"; // bump together with version.json on every release
+const APP_VERSION = "16"; // bump together with version.json on every release
 const $ = (s, el = document) => el.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
@@ -753,7 +753,7 @@ async function topUpSeries() {
   const target = addDays(today, HORIZON_DAYS);
   for (const s of state.series) {
     if (!s.active || s.generated_until >= addDays(today, TOPUP_DAYS)) continue;
-    const rows = seriesRows(s, seriesDates(s, addDays(s.generated_until, 1), target));
+    const rows = seriesRows(s, seriesDates(s, addDays(s.generated_until, 1), target)).map((r) => ({ ...r, new_notified: true }));
     if (rows.length) {
       const { data, error } = await sb.from("tasks").insert(rows).select();
       if (error) { console.warn(error); continue; }
@@ -972,6 +972,7 @@ function openTaskSheet(task, presetDate) {
         // photos are stored once (on the first day) and shown on every repeat
         if (newFiles.length) { $("#fSave", el).textContent = "Uploading photos…"; await uploadImages(data[0].id, newFiles, "task"); }
         toast(rows.length > 1 ? `${rows.length} tasks added` : "Task added");
+        pingThreshold(); // also sends the "new task" notification
       }
       closeSheet(); renderAll();
     };

@@ -31,7 +31,7 @@ function sgNow() {
   const d = new Date(Date.now() + 8 * 3600 * 1000); // shift, then read UTC fields
   return { hour: d.getUTCHours(), dow: d.getUTCDay(), date: d.toISOString().slice(0, 10) };
 }
-// Quiet time 2am–7am (Singapore): nothing is sent; penalty/threshold alerts wait until 7am
+// Quiet time 2am–7am (Singapore): nothing is sent; new-task/penalty/threshold alerts wait until 7am
 const QUIET_FROM = 2, QUIET_TO = 7;
 function isQuiet(hour = sgNow().hour) { return hour >= QUIET_FROM && hour < QUIET_TO; }
 function addDays(iso: string, n: number) {
@@ -139,6 +139,31 @@ async function notifyPenalties(userId: string) {
   return fresh.length;
 }
 
+// Tell the user about tasks the admin has just added (a repeating task is announced once)
+async function notifyNewTasks(userId: string) {
+  const { data: fresh } = await admin.from("tasks").select("id,title,due_date,due_time,start_date,series_id,penalty_points,repeat")
+    .eq("user_id", userId).eq("new_notified", false).eq("archived", false).order("due_date");
+  if (!fresh || !fresh.length) return 0;
+  await admin.from("tasks").update({ new_notified: true }).in("id", fresh.map((t) => t.id));
+  const seen = new Set<string>();
+  const items = fresh.filter((t) => { const k = t.series_id || t.id; if (seen.has(k)) return false; seen.add(k); return true; });
+  const fmt = (d: string) => `${Number(d.slice(8))}/${Number(d.slice(5, 7))}`;
+  const rep: Record<string, string> = { daily: "every day", weekly: "every week", monthly: "every month", days: "selected days" };
+  const line = (t: typeof items[number]) => {
+    const when = t.series_id ? `repeats ${rep[t.repeat] || ""}`.trim()
+      : t.start_date && t.start_date < t.due_date ? `${fmt(t.start_date)}–${fmt(t.due_date)}`
+      : `due ${fmt(t.due_date)}${t.due_time ? " " + t.due_time.slice(0, 5) : ""}`;
+    return `• ${t.title} (${when}${t.penalty_points ? `, ${t.penalty_points} pts` : ""})`;
+  };
+  await sendToUser(userId, {
+    title: items.length === 1 ? `🆕 New task: ${items[0].title}` : `🆕 ${items.length} new tasks`,
+    body: items.slice(0, 4).map(line).join("\n") + (items.length > 4 ? `\n+${items.length - 4} more` : ""),
+    tag: "newtask-" + items[0].id,
+    url: "./",
+  });
+  return items.length;
+}
+
 async function checkThreshold(userId: string) {
   const [{ data: entries }, { data: ths }, { data: st }] = await Promise.all([
     admin.from("penalty_entries").select("points").eq("user_id", userId).eq("cleared", false),
@@ -194,7 +219,7 @@ Deno.serve(async (req) => {
       const { data: chargedN } = await admin.rpc("apply_missed_penalties", { p_user: null });
       const charged = chargedN || 0;
       // alerts for points / thresholds are held during quiet time and go out at 7am
-      if (!quiet) for (const u of users || []) { await notifyPenalties(u.user_id); await checkThreshold(u.user_id); }
+      if (!quiet) for (const u of users || []) { await notifyNewTasks(u.user_id); await notifyPenalties(u.user_id); await checkThreshold(u.user_id); }
       return json({ ok: true, sg: now, quiet, topOfHour, inWindow, reminders, charged });
     }
 
@@ -227,6 +252,7 @@ Deno.serve(async (req) => {
       return json({ ok: true, sent });
     }
     if (isQuiet()) return json({ ok: true, quiet: true }); // held until 7am
+    await notifyNewTasks(user.id);
     await notifyPenalties(user.id);
     const r = await checkThreshold(user.id);
     return json({ ok: true, ...r });
