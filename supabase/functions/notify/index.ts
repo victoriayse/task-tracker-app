@@ -1,5 +1,5 @@
 // Task Tracker – push notifications
-// Called hourly by pg_cron (header x-cron-secret) and by the app (user JWT) after points change.
+// Called every 5 minutes by pg_cron (header x-cron-secret) and by the app after points change.
 import { createClient } from "npm:@supabase/supabase-js@2.45.4";
 import webpush from "npm:web-push@3.6.7";
 
@@ -60,43 +60,62 @@ async function sendToUser(userId: string, payload: Record<string, unknown>) {
   return sent;
 }
 
-// Which unchecked tasks to mention this hour.
-//  • One-date tasks (and anything overdue): weekdays 9pm–12am, weekends 12pm–12am  (inWindow)
-//  • Time-range tasks: 12pm every day inside the range, then hourly 7pm–11pm on the due (last) day
-async function remindUser(userId: string, refDate: string, lastCall: boolean, inWindow: boolean, hour: number, today: string, force = false) {
+// Which unchecked tasks to mention on this run (the job runs every 5 minutes).
+// Per task notify_mode:
+//  • default  – one-date tasks: hourly, weekdays 9pm–12am / weekends 12pm–12am; time-range tasks: 12pm daily, then 7–11pm on the due day
+//  • hourly   – every hour on the hour from notify_from (or now) until the task is due
+//  • specific – at each chosen date/time (also during quiet time — you picked it)
+//  • range    – every hour on the hour between notify_from and notify_to
+//  • off      – never
+type T = { title: string; due_date: string; due_time: string | null; start_date: string | null; penalty_points: number;
+  notify_mode: string; notify_times: string[] | null; notify_from: string | null; notify_to: string | null };
+async function remindUser(userId: string, o: { refDate: string; lastCall: boolean; inWindow: boolean; hour: number; today: string;
+  topOfHour: boolean; quiet: boolean; slotEnd: number; force?: boolean }) {
   const { data: all } = await admin
     .from("tasks")
-    .select("title,due_date,due_time,start_date,penalty_points,remind_from")
+    .select("title,due_date,due_time,start_date,penalty_points,notify_mode,notify_times,notify_from,notify_to")
     .eq("user_id", userId)
     .eq("completed", false)
     .eq("archived", false)
-    .lte("due_date", addDays(today, 400))
+    .lte("due_date", addDays(o.today, 400))
     .order("due_date");
-  const isRange = (t: { start_date: string | null; due_date: string }) => !!t.start_date && t.start_date < t.due_date;
-  const nowMs = Date.now();
-  // deadline = due date + due time (Singapore), or end of the due day when there's no time
-  const deadline = (t: { due_date: string; due_time: string | null }) =>
+  const isRange = (t: T) => !!t.start_date && t.start_date < t.due_date;
+  const deadline = (t: T) =>
     t.due_time ? Date.parse(`${t.due_date}T${t.due_time.slice(0, 8)}+08:00`) : Date.parse(`${addDays(t.due_date, 1)}T00:00:00+08:00`);
-  const pick = (all || []).filter((t) => {
-    // custom: hourly from the chosen start time until the deadline
-    if (t.remind_from && Date.parse(t.remind_from) <= nowMs + 60_000 && nowMs < deadline(t)) return true;
-    if (force) return t.due_date <= today || (isRange(t) && t.start_date! <= today);
-    if (!isRange(t)) return inWindow && t.due_date <= refDate;
-    if (t.due_date < refDate) return inWindow;                               // overdue range task
-    if (t.due_date === today && hour >= 19 && hour <= 23) return true;       // due day: hourly 7pm–11pm
-    if (hour === 12 && t.start_date! <= today && today < t.due_date) return true; // daily 12pm during range
+  const slotStart = o.slotEnd - 5 * 60_000;
+  const pick = ((all || []) as T[]).filter((t) => {
+    const mode = t.notify_mode || "default";
+    if (mode === "off") return false;
+    if (mode === "specific") {
+      return (t.notify_times || []).some((x) => { const ms = Date.parse(x); return ms > slotStart && ms <= o.slotEnd; });
+    }
+    if (o.quiet || !o.topOfHour) return false; // everything below is hourly, outside quiet time
+    if (o.force) return t.due_date <= o.today || (isRange(t) && t.start_date! <= o.today);
+    if (mode === "hourly") {
+      const from = t.notify_from ? Date.parse(t.notify_from) : 0;
+      return from <= o.slotEnd + 60_000 && o.slotEnd < deadline(t);
+    }
+    if (mode === "range") {
+      if (!t.notify_from || !t.notify_to) return false;
+      return Date.parse(t.notify_from) <= o.slotEnd + 60_000 && o.slotEnd <= Date.parse(t.notify_to);
+    }
+    // default schedule
+    if (!isRange(t)) return o.inWindow && t.due_date <= o.refDate;
+    if (t.due_date < o.refDate) return o.inWindow;                                  // overdue range task
+    if (t.due_date === o.today && o.hour >= 19 && o.hour <= 23) return true;        // due day: hourly 7pm–11pm
+    if (o.hour === 12 && t.start_date! <= o.today && o.today < t.due_date) return true; // daily 12pm during range
     return false;
   });
   if (!pick.length) return 0;
-  const dueToday = pick.filter((t) => t.due_date <= refDate);
-  const pts = dueToday.reduce((a, t) => a + (t.penalty_points || 0), 0);
-  const label = (t: { title: string; due_date: string; start_date: string | null }) =>
-    "• " + t.title + (isRange(t) && t.due_date > today ? ` (due ${t.due_date.slice(8)}/${t.due_date.slice(5, 7)})` : "");
+  const today = o.today;
+  const atStake = pick.filter((t) => t.due_date <= o.refDate).reduce((a, t) => a + (t.penalty_points || 0), 0);
+  const label = (t: T) => "• " + t.title + (t.due_date > today ? ` (due ${t.due_date.slice(8)}/${t.due_date.slice(5, 7)}${t.due_time ? " " + t.due_time.slice(0, 5) : ""})`
+    : t.due_time ? ` (due ${t.due_time.slice(0, 5)})` : "");
   const names = pick.slice(0, 4).map(label).join("\n");
   const more = pick.length > 4 ? `\n+${pick.length - 4} more` : "";
   return sendToUser(userId, {
-    title: lastCall ? `⏰ Last call: ${pick.length} unchecked task${pick.length > 1 ? "s" : ""}` : `📝 ${pick.length} task${pick.length > 1 ? "s" : ""} still unchecked`,
-    body: `${names}${more}${pts ? `\n${pts} penalty pts at stake tonight` : ""}`,
+    title: o.lastCall ? `⏰ Last call: ${pick.length} unchecked task${pick.length > 1 ? "s" : ""}` : `📝 ${pick.length} task${pick.length > 1 ? "s" : ""} still unchecked`,
+    body: `${names}${more}${atStake ? `\n${atStake} penalty pts at stake` : ""}`,
     tag: "reminder",
     url: "./",
   });
@@ -153,10 +172,13 @@ Deno.serve(async (req) => {
     await loadConfig();
     const body = await req.json().catch(() => ({}));
 
-    // ---- Hourly cron ----
+    // ---- Scheduled run (every 5 minutes) ----
     if (req.headers.get("x-cron-secret")) {
       if (req.headers.get("x-cron-secret") !== cronSecret) return json({ error: "forbidden" }, 403);
       const now = sgNow();
+      const minute = new Date().getUTCMinutes();
+      const topOfHour = minute < 5;            // hourly rules only on the first run of each hour
+      const slotEnd = Math.floor(Date.now() / 300_000) * 300_000; // this 5-minute slot
       // 12am belongs to the evening that just ended
       const lastCall = now.hour === 0;
       const refDate = lastCall ? addDays(now.date, -1) : now.date;
@@ -167,13 +189,13 @@ Deno.serve(async (req) => {
       const { data: users } = await admin.from("user_settings").select("user_id");
       const quiet = isQuiet(now.hour);
       let reminders = 0;
-      if (!quiet) for (const u of users || []) reminders += await remindUser(u.user_id, refDate, lastCall, inWindow, now.hour, now.date, !!body.force);
+      for (const u of users || []) reminders += await remindUser(u.user_id, { refDate, lastCall, inWindow, hour: now.hour, today: now.date, topOfHour, quiet, slotEnd, force: !!body.force });
       // Charge points for missed tasks (untimed: after midnight; timed: once the due time passes) — even in quiet time
       const { data: chargedN } = await admin.rpc("apply_missed_penalties", { p_user: null });
       const charged = chargedN || 0;
       // alerts for points / thresholds are held during quiet time and go out at 7am
       if (!quiet) for (const u of users || []) { await notifyPenalties(u.user_id); await checkThreshold(u.user_id); }
-      return json({ ok: true, sg: now, quiet, inWindow, reminders, charged });
+      return json({ ok: true, sg: now, quiet, topOfHour, inWindow, reminders, charged });
     }
 
     // ---- Called from the app (public, shared tracker — no login) ----
@@ -201,7 +223,7 @@ Deno.serve(async (req) => {
     }
     if (body.mode === "remind") {
       const n = sgNow();
-      const sent = await remindUser(user.id, n.date, false, true, n.hour, n.date, true);
+      const sent = await remindUser(user.id, { refDate: n.date, lastCall: false, inWindow: true, hour: n.hour, today: n.date, topOfHour: true, quiet: false, slotEnd: Date.now(), force: true });
       return json({ ok: true, sent });
     }
     if (isQuiet()) return json({ ok: true, quiet: true }); // held until 7am
