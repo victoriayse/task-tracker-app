@@ -5,7 +5,7 @@ const VAPID_PUBLIC = "BJd0pVUgBPkI3t2OEexmrDiuDdxLtn6BavlNkpm8lBhuepe3vP9u4LUCXb
 
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 const OWNER = "00000000-0000-0000-0000-000000000001"; // one shared, public tracker
-const APP_VERSION = "16"; // bump together with version.json on every release
+const APP_VERSION = "17"; // bump together with version.json on every release
 const $ = (s, el = document) => el.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
@@ -246,6 +246,7 @@ function taskRow(t, showDate) {
       ${t.penalty_points ? `<span class="pts">−${t.penalty_points}</span>` : ""}
       ${state.isAdmin ? `<div class="row-actions">
         <button type="button" class="mini-btn" data-edittask="${t.id}" aria-label="Edit task" title="Edit">✎</button>
+        <button type="button" class="mini-btn" data-duptask="${t.id}" aria-label="Duplicate task" title="Duplicate">⧉</button>
         <button type="button" class="mini-btn del" data-deltask="${t.id}" aria-label="Delete task" title="Delete">🗑</button>
       </div>` : ""}
     </div>
@@ -427,10 +428,11 @@ $("#sections").addEventListener("click", async (e) => {
     state.collapsed[sec] = !state.collapsed[sec];
     lsSet("tt_collapsed", state.collapsed); renderAll(); return;
   }
-  const WRITE = d.edittask || d.deltask || d.edit || d.addon || d.delcat || d.delth || d.delentry || d.move || ["addCat", "addTh", "addPenalty", "served"].includes(d.act);
+  const WRITE = d.edittask || d.duptask || d.deltask || d.edit || d.addon || d.delcat || d.delth || d.delentry || d.move || ["addCat", "addTh", "addPenalty", "served"].includes(d.act);
   if (WRITE && !state.isAdmin) return toast(state.adminAuthed ? "Tap ✎ Edit at the top to make changes" : "View only — admin sign-in needed to make changes");
   if (d.check) return toggleTask(d.check);
   if (d.edittask) return openTaskSheet(state.tasks.find((x) => x.id === d.edittask));
+  if (d.duptask) return duplicateTask(state.tasks.find((x) => x.id === d.duptask));
   if (d.deltask) return confirmDelete(state.tasks.find((x) => x.id === d.deltask));
   if (d.open) return openTaskDetails(d.open);
   if (d.day) { state.calSel = d.day; renderAll(); return; }
@@ -703,12 +705,13 @@ function openTaskDetails(id) {
       ${galleryHtml(doneImgs)}` : ""}
     ${checkable || state.isAdmin ? `<div class="btn-row">
       ${checkable ? `<button type="button" class="btn ${t.completed ? "" : "primary"}" id="dCheck">${t.completed ? "Mark not done" : "✓ Mark done"}</button>` : ""}
-      ${state.isAdmin ? `<button type="button" class="btn" id="dEdit">Edit</button>` : ""}</div>` : ""}
+      ${state.isAdmin ? `<button type="button" class="btn" id="dEdit">Edit</button><button type="button" class="btn" id="dDup">⧉ Duplicate</button>` : ""}</div>` : ""}
     ${state.isAdmin ? `<button type="button" class="link" id="dManage" style="color:var(--danger)">Archive or delete…</button>` : ""}
     ${!checkable && !t.completed ? `<p class="muted" style="font-size:12.5px">${isOverdue(t) ? "Overdue — only the admin can tick this off." : "Repeating tasks can't be ticked before their day."}</p>` : ""}
     <button type="button" class="btn ghost block" data-close>Close</button>`, (el) => {
     $("#dCheck", el) && ($("#dCheck", el).onclick = () => { closeSheet(); toggleTask(t.id); });
     $("#dEdit", el) && ($("#dEdit", el).onclick = () => openTaskSheet(t));
+    $("#dDup", el) && ($("#dDup", el).onclick = () => duplicateTask(t));
     $("#dManage", el) && ($("#dManage", el).onclick = () => openManageSheet(t));
   });
 }
@@ -771,14 +774,34 @@ function quickPicks(prefix) {
     `<button type="button" data-pick="${c.id}">${esc(c.item)} · ${c.points}</button>`).join("")}</div>`;
 }
 
-function openTaskSheet(task, presetDate) {
+// Duplicate: open a "New task" form pre-filled from an existing task (you can change anything before saving)
+function duplicateTask(src) {
+  if (!src) return;
+  const s = src.series_id && state.series.find((x) => x.id === src.series_id);
+  const today = sgDateStr();
+  // move past dates forward to today, keeping a time range's length
+  let due = src.due_date, start = isRange(src) ? src.start_date : null;
+  if ((start || due) < today) {
+    const len = start ? Math.round((new Date(due + "T00:00:00Z") - new Date(start + "T00:00:00Z")) / 864e5) : 0;
+    start = start ? today : null; due = addDays(today, len);
+  }
+  const future = (x) => (x && Date.parse(x) > Date.now() ? x : null);
+  openTaskSheet(null, due, {
+    title: src.title, notes: src.notes, due_date: due, start_date: start, due_time: src.due_time, penalty_points: src.penalty_points,
+    notify_mode: src.notify_mode === "specific" || src.notify_mode === "range" ? (s ? "default" : src.notify_mode) : src.notify_mode,
+    notify_times: (src.notify_times || []).filter((x) => future(x)), notify_from: future(src.notify_from), notify_to: future(src.notify_to),
+    _repeat: s ? s.repeat : "none", _days: s ? s.days : null,
+  });
+  setTimeout(() => toast("Copy ready — change anything, then tap Add task"), 300);
+}
+function openTaskSheet(task, presetDate, template) {
   const isEdit = !!task;
-  const t = task || { title: "", notes: "", due_date: presetDate || sgDateStr(), due_time: null, penalty_points: 5, repeat: "none" };
-  let repeat = "none";
-  let days = [dow(t.due_date)];
+  const t = task || template || { title: "", notes: "", due_date: presetDate || sgDateStr(), due_time: null, penalty_points: 5, repeat: "none" };
+  let repeat = (template && template._repeat) || "none";
+  let days = (template && template._days && template._days.length) ? [...template._days] : [dow(t.due_date)];
   let mode = isRange(t) ? "range" : "one";
   let nmode = t.notify_mode || (t.remind_from ? "hourly" : "default");
-  openSheet(`<h3 class="serif">${isEdit ? "Edit task" : "New task"}</h3>
+  openSheet(`<h3 class="serif">${isEdit ? "Edit task" : template ? "Duplicate task" : "New task"}</h3>
     <label class="field"><span>Task</span><input id="fTitle" type="text" value="${esc(t.title)}" placeholder="e.g. Submit report" maxlength="120"></label>
     ${quickPicks()}
     ${t.series_id ? "" : `<div class="field"><span>When</span><div class="seg" id="fWhen">
