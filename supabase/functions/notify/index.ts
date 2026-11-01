@@ -63,17 +63,18 @@ async function sendToUser(userId: string, payload: Record<string, unknown>) {
 // Which unchecked tasks to mention on this run (the job runs every 5 minutes).
 // Per task notify_mode:
 //  • default  – one-date tasks: hourly, weekdays 9pm–12am / weekends 12pm–12am; time-range tasks: 12pm daily, then 7–11pm on the due day
-//  • hourly   – every hour on the hour from notify_from (or now) until the task is due
+//  • hourly   – every notify_interval minutes (default 60) from notify_from (or the top of the day) until the task is due
 //  • specific – at each chosen date/time (also during quiet time — you picked it)
-//  • range    – every hour on the hour between notify_from and notify_to
+//  • range    – every notify_interval minutes between notify_from and notify_to
+// Plus, for every task: a "due in 15 minutes" warning (see dueSoon)
 //  • off      – never
-type T = { title: string; due_date: string; due_time: string | null; start_date: string | null; penalty_points: number;
+type T = { id: string; notify_interval: number | null; title: string; due_date: string; due_time: string | null; start_date: string | null; penalty_points: number;
   notify_mode: string; notify_times: string[] | null; notify_from: string | null; notify_to: string | null };
 async function remindUser(userId: string, o: { refDate: string; lastCall: boolean; inWindow: boolean; hour: number; today: string;
   topOfHour: boolean; quiet: boolean; slotEnd: number; force?: boolean }) {
   const { data: all } = await admin
     .from("tasks")
-    .select("title,due_date,due_time,start_date,penalty_points,notify_mode,notify_times,notify_from,notify_to")
+    .select("id,title,due_date,due_time,start_date,penalty_points,notify_mode,notify_times,notify_from,notify_to,notify_interval")
     .eq("user_id", userId)
     .eq("completed", false)
     .eq("archived", false)
@@ -89,16 +90,24 @@ async function remindUser(userId: string, o: { refDate: string; lastCall: boolea
     if (mode === "specific") {
       return (t.notify_times || []).some((x) => { const ms = Date.parse(x); return ms > slotStart && ms <= o.slotEnd; });
     }
-    if (o.quiet || !o.topOfHour) return false; // everything below is hourly, outside quiet time
+    if (o.quiet) return false; // everything below pauses during quiet time
     if (o.force) return t.due_date <= o.today || (isRange(t) && t.start_date! <= o.today);
+    // repeat every N minutes, counted from the start time (or from midnight)
+    const every = (anchor: number) => {
+      const step = Math.max(5, t.notify_interval || 60) * 60_000;
+      const a = Math.floor(anchor / 300_000) * 300_000;
+      return o.slotEnd >= a && (o.slotEnd - a) % step === 0;
+    };
+    const dayStart = Date.parse(`${o.today}T00:00:00+08:00`);
     if (mode === "hourly") {
-      const from = t.notify_from ? Date.parse(t.notify_from) : 0;
-      return from <= o.slotEnd + 60_000 && o.slotEnd < deadline(t);
+      const from = t.notify_from ? Date.parse(t.notify_from) : dayStart;
+      return o.slotEnd < deadline(t) && every(from);
     }
     if (mode === "range") {
       if (!t.notify_from || !t.notify_to) return false;
-      return Date.parse(t.notify_from) <= o.slotEnd + 60_000 && o.slotEnd <= Date.parse(t.notify_to);
+      return o.slotEnd <= Date.parse(t.notify_to) && every(Date.parse(t.notify_from));
     }
+    if (!o.topOfHour) return false; // default schedule is hourly
     // default schedule
     if (!isRange(t)) return o.inWindow && t.due_date <= o.refDate;
     if (t.due_date < o.refDate) return o.inWindow;                                  // overdue range task
@@ -109,8 +118,8 @@ async function remindUser(userId: string, o: { refDate: string; lastCall: boolea
   if (!pick.length) return 0;
   const today = o.today;
   const atStake = pick.filter((t) => t.due_date <= o.refDate).reduce((a, t) => a + (t.penalty_points || 0), 0);
-  const label = (t: T) => "• " + t.title + (t.due_date > today ? ` (due ${t.due_date.slice(8)}/${t.due_date.slice(5, 7)}${t.due_time ? " " + t.due_time.slice(0, 5) : ""})`
-    : t.due_time ? ` (due ${t.due_time.slice(0, 5)})` : "");
+  const label = (t: T) => "• " + t.title + (t.due_date > today ? ` (due ${Number(t.due_date.slice(8))}/${Number(t.due_date.slice(5, 7))}${t.due_time ? " " + fmt12(t.due_time) : ""})`
+    : t.due_date < today ? " (overdue)" : t.due_time ? ` (due ${fmt12(t.due_time)})` : " (due tonight)");
   const names = pick.slice(0, 4).map(label).join("\n");
   const more = pick.length > 4 ? `\n+${pick.length - 4} more` : "";
   return sendToUser(userId, {
@@ -120,6 +129,32 @@ async function remindUser(userId: string, o: { refDate: string; lastCall: boolea
     url: "./",
   });
 }
+// 15 minutes before any unchecked task is due: a last warning (one per task)
+async function dueSoon(userId: string, slotEnd: number) {
+  const today = sgNow().date;
+  const { data: all } = await admin.from("tasks").select("id,title,due_date,due_time,penalty_points")
+    .eq("user_id", userId).eq("completed", false).eq("archived", false)
+    .gte("due_date", addDays(today, -1)).lte("due_date", addDays(today, 1));
+  const slotStart = slotEnd - 5 * 60_000;
+  const due = (all || []).filter((t) => {
+    const dl = t.due_time ? Date.parse(`${t.due_date}T${t.due_time.slice(0, 8)}+08:00`) : Date.parse(`${addDays(t.due_date, 1)}T00:00:00+08:00`);
+    const warn = dl - 15 * 60_000;
+    return warn > slotStart && warn <= slotEnd;
+  });
+  for (const t of due.slice(0, 5)) {
+    const at = t.due_time ? fmt12(t.due_time) : "midnight";
+    await sendToUser(userId, {
+      title: `⏰ "${t.title}" is due in 15 min (${at})`,
+      body: `Have you completed this task? Mark as completed now to avoid penalty charges!${t.penalty_points ? ` (${t.penalty_points} pts)` : ""}`,
+      tag: "due-" + t.id,
+      url: "./?open=" + t.id,
+      requireInteraction: true,
+    });
+  }
+  return due.length;
+}
+function fmt12(t: string) { const [h, m] = t.split(":").map(Number); return `${((h + 11) % 12) + 1}:${String(m).padStart(2, "0")}${h < 12 ? "am" : "pm"}`; }
+
 // Tell the user about any newly added penalty points (missed tasks or manual)
 async function notifyPenalties(userId: string) {
   const { data: fresh } = await admin.from("penalty_entries").select("id,description,points")
@@ -152,7 +187,7 @@ async function notifyNewTasks(userId: string) {
   const line = (t: typeof items[number]) => {
     const when = t.series_id ? `repeats ${rep[t.repeat] || ""}`.trim()
       : t.start_date && t.start_date < t.due_date ? `${fmt(t.start_date)}–${fmt(t.due_date)}`
-      : `due ${fmt(t.due_date)}${t.due_time ? " " + t.due_time.slice(0, 5) : ""}`;
+      : `due ${fmt(t.due_date)}${t.due_time ? " " + fmt12(t.due_time) : ""}`;
     return `• ${t.title} (${when}${t.penalty_points ? `, ${t.penalty_points} pts` : ""})`;
   };
   await sendToUser(userId, {
@@ -215,12 +250,15 @@ Deno.serve(async (req) => {
       const quiet = isQuiet(now.hour);
       let reminders = 0;
       for (const u of users || []) reminders += await remindUser(u.user_id, { refDate, lastCall, inWindow, hour: now.hour, today: now.date, topOfHour, quiet, slotEnd, force: !!body.force });
+      // the 15-minute warning goes out even in quiet time — penalty points are about to be charged
+      let warned = 0;
+      for (const u of users || []) warned += await dueSoon(u.user_id, slotEnd);
       // Charge points for missed tasks (untimed: after midnight; timed: once the due time passes) — even in quiet time
       const { data: chargedN } = await admin.rpc("apply_missed_penalties", { p_user: null });
       const charged = chargedN || 0;
       // alerts for points / thresholds are held during quiet time and go out at 7am
       if (!quiet) for (const u of users || []) { await notifyNewTasks(u.user_id); await notifyPenalties(u.user_id); await checkThreshold(u.user_id); }
-      return json({ ok: true, sg: now, quiet, topOfHour, inWindow, reminders, charged });
+      return json({ ok: true, sg: now, quiet, topOfHour, inWindow, reminders, warned, charged });
     }
 
     // ---- Called from the app (public, shared tracker — no login) ----

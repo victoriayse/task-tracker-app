@@ -23,7 +23,11 @@ self.addEventListener("notificationclick", (event) => {
   const url = new URL(event.notification.data?.url || "./", self.registration.scope).href;
   event.waitUntil(
     self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((list) => {
-      for (const c of list) if (c.url.startsWith(self.registration.scope)) return c.focus();
+      const id = new URL(url).searchParams.get("open");
+      for (const c of list) if (c.url.startsWith(self.registration.scope)) {
+        if (id) c.postMessage({ type: "open", id }); // open that task in the running app
+        return c.focus();
+      }
       return self.clients.openWindow(url);
     })
   );

@@ -230,3 +230,7 @@ body.admin-authed .edit-toggle{display:inline-flex;align-items:center}
 .seg button:disabled{opacity:.35}
 .time-row input{flex:1}
 .time-row .x-btn{flex:0 0 30px}
+
+.due-tag{font-weight:600;color:var(--ink)}
+.due-tag.soon{color:var(--warn)}
+.due-tag.late{color:var(--danger)}

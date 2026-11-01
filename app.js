@@ -5,7 +5,7 @@ const VAPID_PUBLIC = "BJd0pVUgBPkI3t2OEexmrDiuDdxLtn6BavlNkpm8lBhuepe3vP9u4LUCXb
 
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 const OWNER = "00000000-0000-0000-0000-000000000001"; // one shared, public tracker
-const APP_VERSION = "17"; // bump together with version.json on every release
+const APP_VERSION = "18"; // bump together with version.json on every release
 const $ = (s, el = document) => el.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
@@ -156,6 +156,7 @@ async function boot() {
   registerSW();
   subscribeRealtime();
   checkForUpdate();
+  openFromUrl();
 }
 
 let rtChannel;
@@ -216,15 +217,16 @@ function taskRow(t, showDate) {
   const today = sgDateStr();
   const late = !t.completed && t.due_date < today;
   const meta = [];
+  // always show when it's due: "Due today 1:00 pm" / "Due tonight (12am)" / "Overdue · due Yesterday"
+  const lateNow = !t.completed && isOverdue(t);
+  const soon = !t.completed && !lateNow && t.due_date === today;
+  meta.push(`<span class="due-tag${lateNow ? " late" : soon ? " soon" : ""}">⏰ ${lateNow ? "Overdue · " : ""}${dueText(t)}</span>`);
   if (isRange(t)) {
-    if (!t.completed && !late && t.due_date === today) meta.push(`<span class="late">Due today</span>`);
-    else if (showDate || late) meta.push(`<span class="${late ? "late" : ""}">${late ? "Overdue · due " : "Due "}${relDay(t.due_date)}</span>`);
     const r = activeOn(t, today) ? rangeDay(t, today) : null;
     meta.push(`<span>📅 ${rangeText(t)}${r && !t.completed ? ` · day ${r.day} of ${r.of}` : ""}</span>`);
-  } else if (showDate) meta.push(`<span class="${late ? "late" : ""}">${late ? "Overdue · " : ""}${relDay(t.due_date)}</span>`);
-  if (t.due_time) meta.push(`<span>🕒 ${fmtTime(t.due_time)}</span>`);
+  }
   const nm = t.notify_mode || (t.remind_from ? "hourly" : "default");
-  if (!t.completed && nm !== "default") meta.push(`<span>${nm === "off" ? "🔕 off" : nm === "hourly" ? "🔔 hourly" : nm === "specific" ? `🔔 ${(t.notify_times || []).length}×` : "🔔 from–to"}</span>`);
+  if (!t.completed && nm !== "default") meta.push(`<span>${nm === "off" ? "🔕 off" : nm === "hourly" ? `🔔 every ${fmtEvery(t.notify_interval)}` : nm === "specific" ? `🔔 ${(t.notify_times || []).length}×` : `🔔 from–to, every ${fmtEvery(t.notify_interval)}`}</span>`);
   const rt = repeatText(t);
   if (rt) meta.push(`<span>🔁 ${esc(rt)}</span>`);
   if (t.penalized) meta.push(`<span class="late">Penalty charged</span>`);
@@ -496,7 +498,20 @@ function toLocalInput(iso) {
   if (!iso) return "";
   return new Date(new Date(iso).getTime() + 8 * 3600e3).toISOString().slice(0, 16);
 }
-const NOTIFY_LABEL = { default: "Default", hourly: "Hourly", specific: "Specific time(s)", range: "From – to", off: "Off" };
+const NOTIFY_LABEL = { default: "Default", hourly: "Every X min", specific: "Specific time(s)", range: "From – to", off: "Off" };
+const INTERVALS = [5, 10, 15, 20, 30, 45, 60, 90, 120, 180, 240];
+function fmtEvery(m) { m = m || 60; return m % 60 === 0 ? (m === 60 ? "hour" : `${m / 60} hours`) : m > 60 ? `${Math.floor(m / 60)}h ${m % 60}min` : `${m} min`; }
+function intervalSelect(id, val) {
+  val = val || 60;
+  return `<label class="field" style="margin-top:6px"><span>Every</span><select id="${id}">${INTERVALS.map((m) => `<option value="${m}" ${m === val ? "selected" : ""}>${fmtEvery(m)}</option>`).join("")}</select></label>`;
+}
+// "today, 1:00 pm" / "tonight (by 12am)" / "Sat 7 Nov, 9:00 am"
+function dueText(t) {
+  const today = sgDateStr();
+  const day = t.due_date === today ? "today" : t.due_date === addDays(today, 1) ? "tomorrow" : t.due_date === addDays(today, -1) ? "yesterday" : fmtDate(t.due_date);
+  if (t.due_time) return `Due ${day}, ${fmtTime(t.due_time)}`;
+  return t.due_date === today ? "Due tonight (by 12am)" : `Due ${day} (by 12am)`;
+}
 function timeRowHtml(iso) {
   return `<div class="row time-row" style="margin-top:6px;align-items:center"><input type="datetime-local" step="300" value="${toLocalInput(iso)}">
     <button type="button" class="x-btn" data-rmtime aria-label="Remove time">✕</button></div>`;
@@ -505,9 +520,9 @@ function fmtDT(iso) { return new Date(iso).toLocaleString("en-SG", { day: "numer
 function notifyText(t) {
   const m = t.notify_mode || (t.remind_from ? "hourly" : "default");
   if (m === "off") return "Off";
-  if (m === "hourly") return (t.notify_from || t.remind_from) ? `Hourly from ${fmtDT(t.notify_from || t.remind_from)} until due` : "Hourly until due";
+  if (m === "hourly") return (t.notify_from || t.remind_from) ? `Every ${fmtEvery(t.notify_interval)} from ${fmtDT(t.notify_from || t.remind_from)} until due` : `Every ${fmtEvery(t.notify_interval)} until due`;
   if (m === "specific") return (t.notify_times || []).map(fmtDT).join(" · ") || "Specific times";
-  if (m === "range") return t.notify_from && t.notify_to ? `Hourly ${fmtDT(t.notify_from)} → ${fmtDT(t.notify_to)}` : "From – to";
+  if (m === "range") return t.notify_from && t.notify_to ? `Every ${fmtEvery(t.notify_interval)}, ${fmtDT(t.notify_from)} → ${fmtDT(t.notify_to)}` : "From – to";
   return "";
 }
 function isRange(t) { return !!t.start_date && t.start_date < t.due_date; }
@@ -686,8 +701,8 @@ function openTaskDetails(id) {
   const rows = [
     isRange(t)
       ? ["Time range", `${fmtDate(t.start_date, { weekday: "short", day: "numeric", month: "short" })} → ${fmtDate(t.due_date, { weekday: "short", day: "numeric", month: "short" })} <span class="muted">(due on the last day)</span>`]
-      : ["Due date", fmtDate(t.due_date, { weekday: "long", day: "numeric", month: "long", year: "numeric" })],
-    t.due_time ? ["Time", fmtTime(t.due_time)] : null,
+      : ["Due", `${fmtDate(t.due_date, { weekday: "long", day: "numeric", month: "long", year: "numeric" })}, ${t.due_time ? fmtTime(t.due_time) : "by 12am (end of day)"}`],
+    isRange(t) ? ["Due time", t.due_time ? fmtTime(t.due_time) : "by 12am (end of the last day)"] : null,
     notifyText(t) && !t.completed ? ["Notifications", esc(notifyText(t))] : null,
     ["Penalty if missed", `${t.penalty_points} pts`],
     repeatText(t) ? ["Repeats", esc(repeatText(t))] : null,
@@ -748,7 +763,7 @@ function seriesDates(s, from, to) {
   return out;
 }
 function seriesRows(s, dates) {
-  return dates.map((d) => ({ title: s.title, notes: s.notes, due_time: s.due_time, penalty_points: s.penalty_points, due_date: d, repeat: s.repeat, series_id: s.id, notify_mode: s.notify_mode || "default" }));
+  return dates.map((d) => ({ title: s.title, notes: s.notes, due_time: s.due_time, penalty_points: s.penalty_points, due_date: d, repeat: s.repeat, series_id: s.id, notify_mode: s.notify_mode || "default", notify_interval: s.notify_interval || 60 }));
 }
 // keep active repeating tasks topped up so they never run out
 async function topUpSeries() {
@@ -790,6 +805,7 @@ function duplicateTask(src) {
     title: src.title, notes: src.notes, due_date: due, start_date: start, due_time: src.due_time, penalty_points: src.penalty_points,
     notify_mode: src.notify_mode === "specific" || src.notify_mode === "range" ? (s ? "default" : src.notify_mode) : src.notify_mode,
     notify_times: (src.notify_times || []).filter((x) => future(x)), notify_from: future(src.notify_from), notify_to: future(src.notify_to),
+    notify_interval: src.notify_interval || 60,
     _repeat: s ? s.repeat : "none", _days: s ? s.days : null,
   });
   setTimeout(() => toast("Copy ready — change anything, then tap Add task"), 300);
@@ -819,7 +835,8 @@ function openTaskSheet(task, presetDate, template) {
       </div>
       <div class="npanel ${nmode === "default" ? "" : "hidden"}" data-np="default"><div class="muted nhint" id="fNDefHint"></div></div>
       <div class="npanel ${nmode === "hourly" ? "" : "hidden"}" data-np="hourly">
-        <div class="muted nhint" id="fHrHint">Every hour, on the hour, until the task is due.</div>
+        <div class="muted nhint" id="fHrHint">Repeats until the task is due.</div>
+        ${intervalSelect("fHrEvery", t.notify_interval)}
         <div class="row" id="fHrRow" style="margin-top:6px"><label class="field" style="margin-top:0"><span>Starting</span><input id="fHrFrom" type="datetime-local" value="${toLocalInput(t.notify_from)}"></label>
           <button type="button" class="btn small" id="fHrNow" style="flex:0 0 auto;align-self:flex-end;margin-bottom:4px">Now</button></div>
       </div>
@@ -829,7 +846,8 @@ function openTaskSheet(task, presetDate, template) {
         <button type="button" class="btn small" id="fAddTime" style="margin-top:6px">＋ Add date/time</button>
       </div>
       <div class="npanel ${nmode === "range" ? "" : "hidden"}" data-np="range">
-        <div class="muted nhint">Every hour, on the hour, between these two times.</div>
+        <div class="muted nhint">Repeats between these two times.</div>
+        ${intervalSelect("fRgEvery", t.notify_interval)}
         <div class="row"><label class="field" style="margin-top:6px"><span>From</span><input id="fNFrom" type="datetime-local" value="${toLocalInput(t.notify_from)}"></label>
           <label class="field" style="margin-top:6px"><span>To</span><input id="fNTo" type="datetime-local" value="${toLocalInput(t.notify_to)}"></label></div>
       </div>
@@ -907,7 +925,7 @@ function openTaskSheet(task, presetDate, template) {
       el.querySelectorAll('#fNMode [data-n="specific"], #fNMode [data-n="range"]').forEach((b) => (b.disabled = rep || !!t.series_id));
       if ((rep || t.series_id) && (nmode === "specific" || nmode === "range")) setN("default");
       $("#fHrRow", el).classList.toggle("hidden", rep || !!t.series_id);
-      $("#fHrHint", el).textContent = rep || t.series_id ? "Every hour, on the hour, on each repeat day until it's due." : "Every hour, on the hour, until the task is due.";
+      $("#fHrHint", el).textContent = rep || t.series_id ? "Repeats on each repeat day (from midnight) until it's due." : "Repeats from the start time until the task is due.";
       $("#fNRepeatNote", el).textContent = rep || t.series_id ? "Repeating tasks: Default, Hourly or Off." : "";
     };
     const setN = (n) => {
@@ -958,6 +976,7 @@ function openTaskSheet(task, presetDate, template) {
         title,
         remind_from: null,
         notify_mode: nmode, notify_times, notify_from, notify_to,
+        notify_interval: Number((nmode === "range" ? $("#fRgEvery", el) : $("#fHrEvery", el)).value) || 60,
         ...(t.series_id ? {} : { start_date }),
         due_date: dueVal,
         due_time: $("#fTime", el).value || null,
@@ -982,6 +1001,7 @@ function openTaskSheet(task, presetDate, template) {
             title: base.title, notes: base.notes, due_time: base.due_time, penalty_points: base.penalty_points,
             repeat, days: repeat === "days" ? days : [], anchor: base.due_date, generated_until: until,
             notify_mode: ["default", "hourly", "off"].includes(nmode) ? nmode : "default",
+            notify_interval: Number($("#fHrEvery", el).value) || 60,
           }).select().single();
           if (se) { $("#fSave", el).disabled = false; return toast(se.message); }
           state.series.push(s);
@@ -1185,6 +1205,20 @@ async function deleteRow(table, key, id) {
   if (key === "thresholds") pingThreshold();
 }
 
+// notification taps open the task: ?open=<task id>
+function openFromUrl() {
+  try {
+    const u = new URL(location.href);
+    const id = u.searchParams.get("open");
+    if (!id) return;
+    u.searchParams.delete("open"); history.replaceState(null, "", u.toString());
+    if (state.tasks.some((x) => x.id === id)) openTaskDetails(id);
+  } catch {}
+}
+navigator.serviceWorker?.addEventListener("message", (e) => {
+  if (e.data?.type === "open" && e.data.id && state.tasks.some((x) => x.id === e.data.id)) openTaskDetails(e.data.id);
+});
+
 /* ---------- Update check ---------- */
 let updateShown = false;
 async function checkForUpdate() {
@@ -1347,7 +1381,7 @@ async function openSettings() {
     ${iosHelp}
     <div class="setting"><div><b>Archived tasks</b><small>${state.archived.length ? `${state.archived.length} archived` : "None"}</small></div><button type="button" class="btn small" id="sArch">View</button></div>
     <div class="setting"><div><b>Photo storage</b><small>${fmtMB(usedBytes())} of 100 MB used</small></div></div>
-    <div class="setting"><div><b>Reminder schedule</b><small>Each task can use its own notifications (Hourly, Specific time(s), From – to or Off) — set it when adding/editing. <b>Default</b> — <b>one due date:</b> hourly while unchecked — weekdays 9pm–12am, weekends 12pm–12am.<br><b>Time range:</b> 12pm every day in the range, then hourly 7pm–11pm on the due day.<br><b>Quiet time 2am–7am:</b> no notifications. Penalty and threshold alerts from that time arrive at 7am.<br>Singapore time. Threshold alerts are otherwise sent straight away.</small></div></div>
+    <div class="setting"><div><b>Reminder schedule</b><small>Every unchecked task also gets a warning <b>15 minutes before it's due</b>. Each task can use its own notifications (Every X min, Specific time(s), From – to or Off) — set it when adding/editing. <b>Default</b> — <b>one due date:</b> hourly while unchecked — weekdays 9pm–12am, weekends 12pm–12am.<br><b>Time range:</b> 12pm every day in the range, then hourly 7pm–11pm on the due day.<br><b>Quiet time 2am–7am:</b> no notifications. Penalty and threshold alerts from that time arrive at 7am.<br>Singapore time. Threshold alerts are otherwise sent straight away.</small></div></div>
     ${subscribed ? `<div class="setting"><div><b>Send a reminder now</b><small>Test what the hourly reminder looks like</small></div><button type="button" class="btn small" id="sTest">Send</button></div>` : ""}
     <div class="setting"><div><b>How penalties work</b><small>A task still unchecked when it's due adds its penalty points automatically — right after its due time if it has one, otherwise after midnight. You get a phone notification whenever points are added.</small></div></div>
     ${state.adminAuthed
