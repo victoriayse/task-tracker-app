@@ -5,7 +5,7 @@ const VAPID_PUBLIC = "BJd0pVUgBPkI3t2OEexmrDiuDdxLtn6BavlNkpm8lBhuepe3vP9u4LUCXb
 
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 const OWNER = "00000000-0000-0000-0000-000000000001"; // one shared, public tracker
-const APP_VERSION = "18"; // bump together with version.json on every release
+const APP_VERSION = "19"; // bump together with version.json on every release
 const $ = (s, el = document) => el.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
@@ -813,8 +813,10 @@ function duplicateTask(src) {
 function openTaskSheet(task, presetDate, template) {
   const isEdit = !!task;
   const t = task || template || { title: "", notes: "", due_date: presetDate || sgDateStr(), due_time: null, penalty_points: 5, repeat: "none" };
-  let repeat = (template && template._repeat) || "none";
-  let days = (template && template._days && template._days.length) ? [...template._days] : [dow(t.due_date)];
+  const series = isEdit && t.series_id ? state.series.find((x) => x.id === t.series_id) : null;
+  let scope = "one"; // for repeating tasks: "one" = this day only, "future" = this & all future days
+  let repeat = (template && template._repeat) || (series && series.repeat) || "none";
+  let days = (template && template._days && template._days.length) ? [...template._days] : (series && series.days && series.days.length) ? [...series.days] : [dow(t.due_date)];
   let mode = isRange(t) ? "range" : "one";
   let nmode = t.notify_mode || (t.remind_from ? "hourly" : "default");
   openSheet(`<h3 class="serif">${isEdit ? "Edit task" : template ? "Duplicate task" : "New task"}</h3>
@@ -857,7 +859,11 @@ function openTaskSheet(task, presetDate, template) {
     </div>
     <div class="muted ${mode === "range" ? "" : "hidden"}" id="fRangeHint" style="font-size:12.5px;margin-top:6px">Reminder at 12pm every day in the range, then hourly 7pm–11pm on the due day. Tick it off any day in the range.</div>
     <label class="field"><span>Penalty points if missed</span><input id="fPts" type="number" inputmode="numeric" min="0" value="${t.penalty_points}"></label>
-    ${isEdit ? (t.series_id ? `<div class="note">🔁 Repeats: ${esc(repeatText(t))}. Changes here apply to this day only.</div>` : "") : `<div class="field ${mode === "range" ? "hidden" : ""}" id="fRepeatWrap"><span>Repeat</span><div class="seg" id="fRepeat">
+    ${isEdit && t.series_id ? `<div class="field"><span>Apply changes to</span><div class="seg" id="fScope">
+        <button type="button" data-s="one" class="on">This day only</button>
+        <button type="button" data-s="future">This &amp; all future days</button></div>
+        <div class="muted nhint" id="fScopeHint">Only ${fmtDate(t.due_date)} changes. Other days stay as they are.</div></div>` : ""}
+    ${isEdit && !t.series_id ? "" : `<div class="field ${mode === "range" || (isEdit && t.series_id) ? "hidden" : ""}" id="fRepeatWrap"><span>Repeat</span><div class="seg" id="fRepeat">
       ${Object.entries(REPEAT_LABEL).map(([k, v]) => `<button type="button" data-r="${k}" class="${k === repeat ? "on" : ""}">${v}</button>`).join("")}
     </div>
     <div class="seg hidden" id="fDays" style="margin-top:8px">
@@ -926,7 +932,7 @@ function openTaskSheet(task, presetDate, template) {
       if ((rep || t.series_id) && (nmode === "specific" || nmode === "range")) setN("default");
       $("#fHrRow", el).classList.toggle("hidden", rep || !!t.series_id);
       $("#fHrHint", el).textContent = rep || t.series_id ? "Repeats on each repeat day (from midnight) until it's due." : "Repeats from the start time until the task is due.";
-      $("#fNRepeatNote", el).textContent = rep || t.series_id ? "Repeating tasks: Default, Hourly or Off." : "";
+      $("#fNRepeatNote", el).textContent = rep || t.series_id ? "Repeating tasks: Default, Every X min or Off." : "";
     };
     const setN = (n) => {
       nmode = n;
@@ -940,6 +946,21 @@ function openTaskSheet(task, presetDate, template) {
     $("#fAddTime", el).onclick = () => $("#fTimes", el).insertAdjacentHTML("beforeend", timeRowHtml(null));
     $("#fTimes", el).addEventListener("click", (e) => { const b = e.target.closest("[data-rmtime]"); if (b) b.closest(".time-row").remove(); });
     $("#fRepeat", el)?.addEventListener("click", () => setTimeout(nHint));
+    $("#fScope", el)?.addEventListener("click", (e) => {
+      const b = e.target.closest("[data-s]"); if (!b) return;
+      scope = b.dataset.s;
+      el.querySelectorAll("#fScope button").forEach((x) => x.classList.toggle("on", x === b));
+      const fut = scope === "future";
+      $("#fRepeatWrap", el).classList.toggle("hidden", !fut);
+      $("#fDate", el).disabled = fut;
+      if (fut) $("#fDate", el).value = t.due_date;
+      $("#fDateLbl", el).textContent = fut ? "Changes start from" : "Due date";
+      $("#fScopeHint", el).textContent = fut
+        ? `Name, time, points, notes, notifications and the repeat pattern change for ${fmtDate(t.due_date)} and every day after. Earlier days stay as they are.`
+        : `Only ${fmtDate(t.due_date)} changes. Other days stay as they are.`;
+      $("#fSave", el).textContent = fut ? "Save for all future days" : "Save changes";
+      hint();
+    });
     nHint();
     let newFiles = [];
     bindPhotoPicker(el, "fPhotos", (f) => (newFiles = f));
@@ -984,7 +1005,14 @@ function openTaskSheet(task, presetDate, template) {
         notes: $("#fNotes", el).value.trim() || null,
       };
       $("#fSave", el).disabled = true;
-      if (isEdit) {
+      if (isEdit && t.series_id && scope === "future") {
+        if (repeat === "days" && !days.length) { $("#fSave", el).disabled = false; return toast("Pick at least one day"); }
+        const ok = await saveSeriesFuture(t, series, {
+          title: base.title, notes: base.notes, due_time: base.due_time, penalty_points: base.penalty_points,
+          notify_mode: ["default", "hourly", "off"].includes(nmode) ? nmode : "default", notify_interval: base.notify_interval,
+        }, repeat, days, newFiles);
+        if (!ok) { $("#fSave", el).disabled = false; return; }
+      } else if (isEdit) {
         // moving a charged task to a future date doesn't refund; keep penalized flag as-is
         const { error } = await sb.from("tasks").update(base).eq("id", t.id);
         if (error) { $("#fSave", el).disabled = false; return toast(error.message); }
@@ -1021,6 +1049,59 @@ function openTaskSheet(task, presetDate, template) {
     };
     $("#fManage", el) && ($("#fManage", el).onclick = () => openManageSheet(t));
   });
+}
+
+/* ---------- Edit a repeating task: this & all future days ---------- */
+async function saveSeriesFuture(t, s, fields, repeat, days, newFiles) {
+  if (!s) { toast("Couldn't find this task's repeat settings"); return false; }
+  const from = t.due_date;
+  const sameDays = (a, b) => [...(a || [])].sort().join() === [...(b || [])].sort().join();
+  const ruleChanged = repeat !== s.repeat || (repeat === "days" && !sameDays(days, s.days));
+  const futureAll = state.tasks.filter((x) => x.series_id === s.id && x.due_date >= from);
+  let err;
+  if (repeat === "none") {
+    // stop repeating after this day: keep this day (updated), remove later open days
+    ({ error: err } = await sb.from("tasks").update(fields).eq("id", t.id));
+    if (err) return toast(err.message), false;
+    const later = futureAll.filter((x) => x.due_date > from && !x.completed && !x.penalized);
+    await deleteImages(state.images.filter((i) => later.some((x) => x.id === i.task_id) && i.kind === "completion"));
+    if (later.length) await sb.from("tasks").delete().in("id", later.map((x) => x.id));
+    await sb.from("task_series").update({ ...fields, active: false }).eq("id", s.id);
+  } else if (!ruleChanged) {
+    // same pattern: just update every day from here on
+    ({ error: err } = await sb.from("tasks").update(fields).eq("series_id", s.id).gte("due_date", from));
+    if (err) return toast(err.message), false;
+    await sb.from("task_series").update(fields).eq("id", s.id);
+  } else {
+    // new pattern: replace the open days from here on with the new pattern
+    const until = addDays(from > sgDateStr() ? from : sgDateStr(), HORIZON_DAYS);
+    const ns = { ...s, ...fields, repeat, days: repeat === "days" ? days : [], anchor: from, generated_until: until, active: true };
+    ({ error: err } = await sb.from("task_series").update({ ...fields, repeat: ns.repeat, days: ns.days, anchor: from, generated_until: until, active: true }).eq("id", s.id));
+    if (err) return toast(err.message), false;
+    const keep = futureAll.filter((x) => x.completed || x.penalized);           // done/charged days stay
+    const drop = futureAll.filter((x) => !x.completed && !x.penalized);
+    const sharedImgs = state.images.filter((i) => i.kind === "task" && drop.some((x) => x.id === i.task_id));
+    const keepDates = new Set(keep.map((x) => x.due_date));
+    const rows = seriesRows(ns, seriesDates(ns, from, until).filter((d) => !keepDates.has(d))).map((r) => ({ ...r, new_notified: true }));
+    let inserted = [];
+    if (rows.length) {
+      const { data, error } = await sb.from("tasks").insert(rows).select();
+      if (error) return toast(error.message), false;
+      inserted = data;
+    }
+    // shared photos move to the first new day so every repeat still shows them
+    if (sharedImgs.length && inserted.length) await sb.from("task_images").update({ task_id: inserted[0].id }).in("id", sharedImgs.map((i) => i.id));
+    if (keep.length) await sb.from("tasks").update(fields).in("id", keep.map((x) => x.id));
+    if (drop.length) await sb.from("tasks").delete().in("id", drop.map((x) => x.id));
+  }
+  // photos added here are shared by every day of the repeat
+  if (newFiles && newFiles.length) {
+    const first = state.tasks.filter((x) => x.series_id === s.id).sort((a, b) => a.due_date.localeCompare(b.due_date))[0];
+    if (first) await uploadImages(first.id, newFiles, "task");
+  }
+  await loadAll();
+  toast(repeat === "none" ? "Repeat stopped after this day" : "Updated this & all future days");
+  return true;
 }
 
 /* ---------- Archive / delete ---------- */
