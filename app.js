@@ -822,6 +822,10 @@ function openTaskSheet(task, presetDate, template) {
   openSheet(`<h3 class="serif">${isEdit ? "Edit task" : template ? "Duplicate task" : "New task"}</h3>
     <label class="field"><span>Task</span><input id="fTitle" type="text" value="${esc(t.title)}" placeholder="e.g. Submit report" maxlength="120"></label>
     ${quickPicks()}
+    ${isEdit && t.series_id ? `<div class="field"><span>Apply changes to</span><div class="seg" id="fScope">
+        <button type="button" data-s="one" class="on">This day only</button>
+        <button type="button" data-s="future">This &amp; all future days</button></div>
+        <div class="muted nhint" id="fScopeHint">Only ${fmtDate(t.due_date)} changes. Other days stay as they are.</div></div>` : ""}
     ${t.series_id ? "" : `<div class="field"><span>When</span><div class="seg" id="fWhen">
       <button type="button" data-w="one" class="${mode === "one" ? "on" : ""}">One due date</button>
       <button type="button" data-w="range" class="${mode === "range" ? "on" : ""}">Time range</button>
@@ -859,10 +863,6 @@ function openTaskSheet(task, presetDate, template) {
     </div>
     <div class="muted ${mode === "range" ? "" : "hidden"}" id="fRangeHint" style="font-size:12.5px;margin-top:6px">Reminder at 12pm every day in the range, then hourly 7pm–11pm on the due day. Tick it off any day in the range.</div>
     <label class="field"><span>Penalty points if missed</span><input id="fPts" type="number" inputmode="numeric" min="0" value="${t.penalty_points}"></label>
-    ${isEdit && t.series_id ? `<div class="field"><span>Apply changes to</span><div class="seg" id="fScope">
-        <button type="button" data-s="one" class="on">This day only</button>
-        <button type="button" data-s="future">This &amp; all future days</button></div>
-        <div class="muted nhint" id="fScopeHint">Only ${fmtDate(t.due_date)} changes. Other days stay as they are.</div></div>` : ""}
     ${isEdit && !t.series_id ? "" : `<div class="field ${mode === "range" || (isEdit && t.series_id) ? "hidden" : ""}" id="fRepeatWrap"><span>Repeat</span><div class="seg" id="fRepeat">
       ${Object.entries(REPEAT_LABEL).map(([k, v]) => `<button type="button" data-r="${k}" class="${k === repeat ? "on" : ""}">${v}</button>`).join("")}
     </div>
